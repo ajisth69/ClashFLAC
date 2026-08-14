@@ -115,6 +115,13 @@ npm run dev
 
 ---
 
+## Acknowledgments & Credits
+
+- **Logo Design**: Special thanks to [@Dekuiuto](https://t.me/Dekuiuto) for crafting the brand logo and visuals.
+- **Community Recommendation**: Special thanks to [@hariprabhu1008](https://t.me/hariprabhu1008) for featuring and recommending the project on his FOSS channel.
+
+---
+
 ## License
 
 This project is licensed under the **MIT License** &mdash; see the [LICENSE](LICENSE) file for details.
@@ -122,3 +129,4 @@ This project is licensed under the **MIT License** &mdash; see the [LICENSE](LIC
 <div align="center">
   <sub>ClashFLAC &bull; Lossless Music Streaming & Download Platform</sub>
 </div>
+
