@@ -1,69 +1,124 @@
-# Amazon Music API & Downloader
+<div align="center">
 
-A lightweight FastAPI server wrapper built around the `amzdl` catalog search, metadata resolution, and lossless audio download library. 
+<img src="frontend/Clash%20music.png" alt="ClashFLAC Logo" width="110" style="border-radius: 20px;" />
 
-This service allows resolving tracks, searching the catalog, and downloading fully tagged, lossless FLAC files directly to your storage.
+# ClashFLAC
+**24-bit Hi-Res Lossless FLAC Streaming & Download Platform**
 
-## Features
+*Instant browser audio previews, comprehensive catalog search, and bit-perfect lossless FLAC downloads with synchronized lyrics and high-resolution album artwork.*
 
-- **Metadata Resolution**: Resolve track details, codec configurations, and stream URLs.
-- **Search Catalog**: Query the Amazon Music catalog directly.
-- **Lossless Downloads**: Download tracks in CD quality (FLAC) with fully embedded metadata, cover art, and synchronized lyrics.
-- **Embedded Synced Lyrics**: Synchronized lyrics (LRC format) are embedded directly within the FLAC metadata (`LYRICS` and `UNSYNCEDLYRICS` tags) rather than writing external sidecar files.
-- **Lazy Initialization**: Server starts up instantly even if credentials are missing, allowing health checks to run.
+<p align="center">
+  <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white" alt="Vite" />
+  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black" alt="JavaScript" />
+  <img src="https://img.shields.io/badge/FLAC-Lossless_Audio-2ea44f?style=for-the-badge" alt="FLAC" />
+  <img src="https://img.shields.io/badge/License-MIT-blueviolet?style=for-the-badge" alt="License" />
+</p>
+
+[Live Web App](https://clashflac.pages.dev) &bull; [API Service](https://clashflac.up.railway.app) &bull; [Documentation](https://clashflac.up.railway.app/docs)
+
+</div>
 
 ---
 
-## Documentation
+## Overview
 
-For setup instructions, endpoint details, and request/response structures, refer to the detailed documentation:
-
-👉 **[Detailed Documentation](./docs.md)**
+**ClashFLAC** is a full-stack music platform designed for discovering, streaming, and downloading bit-perfect lossless FLAC audio. It combines a high-performance REST API backend with a responsive retro-themed web application.
 
 ---
 
-## Quick Start
+## Capabilities
 
-### 1. Requirements
-Ensure you have Python 3.10+ and the required dependencies installed:
-```bash
-pip install -r downloader/src/amazonmusic/requirements.txt
-pip install fastapi uvicorn httpx xmltodict mutagen
+### Music Discovery & Playback
+- **Catalog Search**: Search across millions of tracks, albums, and artists using integrated Amazon Music and Spotify metadata engines.
+- **Instant Browser Playback**: Stream high-quality audio previews directly in the browser with continuous queue management and shuffle/repeat modes.
+- **Track Metadata**: View detailed track information including album names, release years, track numbers, and high-resolution cover artwork.
+
+### Lossless Audio Downloads
+- **Bit-Perfect FLAC**: Download uncompressed 24-bit lossless FLAC audio files directly to your device.
+- **Embedded Synchronized Lyrics**: Synchronized lyrics (LRC format) are embedded directly inside the audio metadata tags.
+- **Embedded High-Resolution Artwork**: High-resolution album covers (500x500+) are embedded directly into each audio file.
+
+### Interface & Controls
+- **Audio Control Bar**: Persistent playback bar with real-time waveform progress, duration scrubbing, and volume control.
+- **Play Queue & History**: Manage an active playback queue and review recently played tracks.
+- **Theme Customization**: Toggle between high-contrast Light and Dark visual themes.
+
+---
+
+## Repository Structure
+
+```text
+ClashFLAC/
+├── amzdl/                    # Amazon Music lossless download & metadata engine
+├── amazonmusic/              # Amazon Music protocol models & schemas
+├── frontend/                 # Single Page Web Application
+│   ├── Clash music.png       # Brand asset & favicon
+│   ├── index.html            # Main markup & icon templates
+│   ├── style.css             # User interface design & animations
+│   ├── app.js                # Player logic, state management, & API client
+│   └── dist/                 # Pre-compiled static web bundle
+├── Procfile                  # Cloud web process definition
+├── railway.json              # Cloud deployment configuration
+├── requirements.txt          # Python backend dependencies
+└── server.py                 # FastAPI backend server
 ```
 
-### 2. Device Registration & Authentication
-The application requires device authentication with Amazon Music. Follow these steps to register your device and generate the required credentials:
+---
 
-1. **Run the account registration CLI**:
-   ```bash
-   python downloader/src/amzdl/main.py accounts --add
-   ```
-2. **Select Region**: Choose your region when prompted (e.g., `US`, `IN`, `GB`).
-3. **Browser Login**: The CLI will generate an OAuth login link. Copy and open this link in your web browser.
-4. **Authorize**: Sign in with your Amazon Music account and authorize the application.
-5. **Paste Callback URL**: After authorizing, you will be redirected to a blank page or a redirect URL. Copy the full URL from your browser's address bar, paste it back into the CLI prompt, and press Enter.
-6. **Persistence**: This registers your device and automatically generates the `credentials.bin` file inside the `config/` directory.
+## Account Setup
 
-> [!NOTE]
-> Alternatively, the `.env` file in the root directory can be populated with your registered customer ID, token, serial, cookies, and RSA private key to manually declare credentials if running in environments without the `config/credentials.bin` file.
+Before running queries against the Amazon Music catalog, register your device credentials using the interactive setup tool.
 
-### 3. Run the Server
-Launch the server using Uvicorn:
+👉 **[Complete Account Setup & Device Registration Guide](setup.md)**
+
+---
+
+## Local Development
+
+### 1. Backend Setup
 ```bash
-python -m uvicorn server:app --host 127.0.0.1 --port 8000
+git clone https://github.com/ajisth69/ClashFLAC.git
+cd ClashFLAC
+
+# Install backend dependencies
+pip install -r requirements.txt
+
+# Start backend server
+python -m uvicorn server:app --host 127.0.0.1 --port 8001 --reload
 ```
+*The backend API will be running at `http://127.0.0.1:8001`.*
 
-### 4. Run the Frontend
-
-In a second terminal, install the frontend dependencies and launch Vite:
-
+### 2. Frontend Setup
+In a separate terminal:
 ```bash
-npm --prefix frontend install
-npm --prefix frontend run dev
+cd frontend
+npm install
+npm run dev
 ```
+*The web interface will be running at `http://localhost:5173`.*
 
-Open `http://localhost:5173`. The frontend connects to
-`http://127.0.0.1:8000` by default; the API address can be changed from the
-in-app Settings dialog.
+---
 
+## API Reference
 
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/` | Serves the web application interface |
+| `GET` | `/health` | Service health status check |
+| `GET` | `/api/config` | Public client configuration |
+| `GET` | `/api/search?q={query}` | Search music catalog for tracks and albums |
+| `GET` | `/api/spotify/search?q={query}` | Search Spotify metadata |
+| `POST` | `/api/resolve` | Resolve stream URLs and track playback information |
+| `POST` | `/api/download` | Download lossless FLAC audio with embedded tags |
+
+---
+
+## License
+
+This project is licensed under the **MIT License** &mdash; see the [LICENSE](LICENSE) file for details.
+
+<div align="center">
+  <sub>ClashFLAC &bull; Lossless Music Streaming & Download Platform</sub>
+</div>
