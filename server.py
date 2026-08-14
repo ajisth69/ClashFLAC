@@ -32,6 +32,18 @@ from urllib.parse import quote
 # Load environment variables from .env
 load_dotenv()
 
+import base64
+
+# Restore credentials from AMZ_CREDENTIALS_BASE64 if running on cloud/Railway
+creds_b64 = (os.getenv("AMZ_CREDENTIALS_BASE64") or "").strip()
+if creds_b64:
+    for target in [Path("credentials.bin"), Path("config/credentials.bin")]:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(base64.b64decode(creds_b64))
+        except Exception as e:
+            pass
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
