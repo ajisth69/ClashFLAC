@@ -1189,7 +1189,7 @@ async function downloadAmazon(job) {
     job.status = "downloading";
     job.message = "Resolving and tagging lossless audio";
     renderDownloads();
-    const token = await getTurnstileToken();
+    const token = await getTurnstileToken(4000);
     const headers = { "Content-Type": "application/json" };
     if (token) {
         headers["X-Turnstile-Token"] = token;
