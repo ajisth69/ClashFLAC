@@ -1,5 +1,4 @@
-const DEFAULT_API_BASE = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_BASE)
-    || (typeof window !== "undefined" && window.location.port === "5173" ? "http://127.0.0.1:8001" : "https://clashflac.up.railway.app");
+const DEFAULT_API_BASE = "https://clashflac.up.railway.app";
 const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 
 const state = {
