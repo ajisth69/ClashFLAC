@@ -66,5 +66,4 @@ Open `http://localhost:5173`. The frontend connects to
 `http://127.0.0.1:8000` by default; the API address can be changed from the
 in-app Settings dialog.
 
-For the implemented UI features and prioritized next steps, see
-[`frontend/UI_PLAN.md`](./frontend/UI_PLAN.md).
+
