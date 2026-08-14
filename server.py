@@ -801,16 +801,38 @@ def get_public_config():
     }
 
 
-# Mount Frontend UI for Root Web App
-frontend_dist = Path("frontend/dist").resolve()
-frontend_src = Path("frontend").resolve()
+# Serve Frontend Web App (Single Page Application)
+frontend_dir = Path("frontend/dist").resolve() if (Path("frontend/dist").resolve() / "index.html").exists() else Path("frontend").resolve()
 
-if frontend_dist.exists() and (frontend_dist / "index.html").exists():
-    logger.info(f"Serving frontend from dist: {frontend_dist}")
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-elif frontend_src.exists() and (frontend_src / "index.html").exists():
-    logger.info(f"Serving frontend from source: {frontend_src}")
-    app.mount("/", StaticFiles(directory=str(frontend_src), html=True), name="frontend")
+@app.get("/")
+async def serve_spa_index():
+    index_path = frontend_dir / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"status": "online", "service": "ClashFLAC Lossless API"}
+
+@app.get("/{full_path:path}")
+async def serve_spa_static(full_path: str):
+    # Pass through API and system routes
+    if full_path.startswith("api/") or full_path in ("health", "docs", "openapi.json", "redoc"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    
+    # 1. Serve specific static asset if it exists
+    candidate = frontend_dir / full_path
+    if candidate.is_file():
+        return FileResponse(str(candidate))
+    
+    # 2. Check in root or frontend
+    alt_candidate = Path("frontend").resolve() / full_path
+    if alt_candidate.is_file():
+        return FileResponse(str(alt_candidate))
+
+    # 3. Fallback to index.html for SPA view routing
+    index_path = frontend_dir / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    raise HTTPException(status_code=404, detail="Not Found")
+
 
 
 
