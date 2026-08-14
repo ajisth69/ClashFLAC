@@ -23,6 +23,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Header, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from amzdl.utils import safe_filename, build_output_filename
@@ -787,17 +788,6 @@ async def download_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/")
-def root_endpoint():
-    return {
-        "status": "online",
-        "service": "ClashFLAC Lossless API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health"
-    }
-
-
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "Amazon Music API Resolver"}
@@ -809,5 +799,18 @@ def get_public_config():
         "turnstile_site_key": CLOUDFLARE_SITE_KEY,
         "turnstile_enabled": bool(TURNSTILE_SECRET_KEY)
     }
+
+
+# Mount Frontend UI for Root Web App
+frontend_dist = Path("frontend/dist").resolve()
+frontend_src = Path("frontend").resolve()
+
+if frontend_dist.exists() and (frontend_dist / "index.html").exists():
+    logger.info(f"Serving frontend from dist: {frontend_dist}")
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+elif frontend_src.exists() and (frontend_src / "index.html").exists():
+    logger.info(f"Serving frontend from source: {frontend_src}")
+    app.mount("/", StaticFiles(directory=str(frontend_src), html=True), name="frontend")
+
 
 
