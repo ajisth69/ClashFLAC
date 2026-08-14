@@ -176,8 +176,44 @@ function resetTurnstile() {
     state.turnstileToken = "";
 }
 
+async function generateBrowserHandshake(method, url) {
+    const timestamp = Date.now().toString();
+    const nonce = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+        ? crypto.randomUUID()
+        : (Math.random().toString(36).substring(2) + Date.now().toString(36));
+
+    let path = url;
+    try {
+        const parsed = new URL(url, window.location.origin);
+        path = parsed.pathname;
+    } catch {}
+
+    const salt = "cf-clash-flac-v2-secure-handshake";
+    const raw = `${method.toUpperCase()}:${path}:${timestamp}:${nonce}:${salt}`;
+
+    let signature = "";
+    try {
+        const msgBuffer = new TextEncoder().encode(raw);
+        const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+        signature = Array.from(new Uint8Array(hashBuffer))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+    } catch {
+        signature = "";
+    }
+
+    return {
+        "X-Clash-Sign": signature,
+        "X-Clash-Time": timestamp,
+        "X-Clash-Nonce": nonce,
+    };
+}
+
 async function requestJson(url, options = {}) {
+    const method = (options.method || "GET").toUpperCase();
+    const handshake = await generateBrowserHandshake(method, url);
     const headers = options.headers ? new Headers(options.headers) : new Headers();
+    Object.entries(handshake).forEach(([k, v]) => headers.set(k, v));
     const token = await getTurnstileToken();
     if (token) {
         headers.set("X-Turnstile-Token", token);
@@ -1157,12 +1193,10 @@ async function downloadAmazon(job) {
     job.status = "downloading";
     job.message = "Resolving and tagging lossless audio";
     renderDownloads();
-    const token = await getTurnstileToken(4000);
-    const headers = { "Content-Type": "application/json" };
-    if (token) {
-        headers["X-Turnstile-Token"] = token;
-    }
-    const response = await fetch(api("/api/download"), {
+    const dlUrl = api("/api/download");
+    const handshake = await generateBrowserHandshake("POST", dlUrl);
+    const headers = { "Content-Type": "application/json", ...handshake };
+    const response = await fetch(dlUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({ input: job.track.downloadInput, quality: state.quality }),

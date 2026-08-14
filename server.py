@@ -73,6 +73,16 @@ from amazonmusic.models import AmazonRegion
 from amzdl.download.download import download as amzdl_download
 from amzdl.metadata.metadata import fetch_metadata
 
+import hashlib
+import hmac
+import time
+from fastapi.responses import JSONResponse
+
+# Browser-Only Security Handshake Configuration
+BROWSER_HANDSHAKE_SALT = "cf-clash-flac-v2-secure-handshake"
+USED_NONCES: Dict[str, float] = {}
+BLOCKED_USER_AGENTS = re.compile(r"(curl|python|requests|aiohttp|wget|postman|insomnia|go-http-client|urllib|libwww-perl|httpclient|scrapy)", re.IGNORECASE)
+
 app = FastAPI(
     title="Amazon Music Metadata & Resolution API",
     description="Strict Amazon Music API integration for catalog search and metadata resolution.",
@@ -93,6 +103,94 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def browser_guard_middleware(request: Request, call_next):
+    # Allow CORS preflight OPTIONS requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    # Allow root SPA, static assets, docs, and health checks
+    if path in ("/", "/health", "/docs", "/openapi.json") or path.startswith(("/assets", "/static", "/favicon")):
+        return await call_next(request)
+
+    # Protect all /api/ endpoints
+    if path.startswith("/api/"):
+        user_agent = request.headers.get("user-agent", "")
+
+        # 1. Block known non-browser automation tools & curl
+        if not user_agent or BLOCKED_USER_AGENTS.search(user_agent):
+            logger.warning(f"Blocked non-browser automated tool: User-Agent='{user_agent}', Path={path}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Direct non-browser access prohibited. Please access via the official web application."}
+            )
+
+        # 2. Enforce valid Origin or Referer from authorized domains
+        origin = request.headers.get("origin") or ""
+        referer = request.headers.get("referer") or ""
+        is_valid_origin = any(
+            allowed in origin or allowed in referer
+            for allowed in ALLOWED_ORIGINS
+        )
+        if not is_valid_origin:
+            logger.warning(f"Blocked unauthorized origin: Origin='{origin}', Referer='{referer}', Path={path}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Access forbidden: Request must originate from the official browser client."}
+            )
+
+        # 3. Verify cryptographic WebCrypto browser signature
+        clash_sign = request.headers.get("x-clash-sign")
+        clash_time = request.headers.get("x-clash-time")
+        clash_nonce = request.headers.get("x-clash-nonce")
+
+        if not (clash_sign and clash_time and clash_nonce):
+            logger.warning(f"Rejected request without browser handshake token on {path}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Browser verification handshake required."}
+            )
+
+        # Validate timestamp freshness (within 30 seconds)
+        try:
+            req_time_ms = int(clash_time)
+            current_time_ms = int(time.time() * 1000)
+            if abs(current_time_ms - req_time_ms) > 30000:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Browser handshake token expired. Please refresh the page."}
+                )
+        except ValueError:
+            return JSONResponse(status_code=403, content={"detail": "Invalid handshake timestamp."})
+
+        # Single-use nonce protection to prevent curl/bot replay attacks
+        now_sec = time.time()
+        expired_keys = [k for k, exp in USED_NONCES.items() if exp < now_sec]
+        for k in expired_keys:
+            USED_NONCES.pop(k, None)
+
+        if clash_nonce in USED_NONCES:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Handshake token already used."}
+            )
+        USED_NONCES[clash_nonce] = now_sec + 60
+
+        # Verify signature
+        expected_raw = f"{request.method.upper()}:{path}:{clash_time}:{clash_nonce}:{BROWSER_HANDSHAKE_SALT}"
+        expected_sign = hashlib.sha256(expected_raw.encode("utf-8")).hexdigest()
+
+        if not hmac.compare_digest(clash_sign, expected_sign):
+            logger.warning(f"Invalid browser signature on {path}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid browser signature."}
+            )
+
+    return await call_next(request)
 
 
 def cleanup_download_artifact(file_path: Path, output_dir: Path):
