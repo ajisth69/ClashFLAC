@@ -753,28 +753,33 @@ async def download_endpoint(
 
         # For single track downloads, return the file directly to the browser
         if kind == "track":
-            # Codec is FLAC for UHD/HD
             extension = ".flac"
             
-            safe_artist = safe_filename(meta.album_artist or meta.artist, False)
-            safe_album = safe_filename(meta.album_name, False)
-            out_name = build_output_filename(str(meta.disc), meta.track_number, meta.title)
+            safe_artist = safe_filename(getattr(meta, "album_artist", None) or getattr(meta, "artist", None), False)
+            safe_album = safe_filename(getattr(meta, "album_name", None), False)
+            out_name = build_output_filename(str(getattr(meta, "disc", "1")), getattr(meta, "track_number", 1), getattr(meta, "title", "track"))
             
             file_path = output_dir / safe_artist / safe_album / (out_name + extension)
             
-            # Fallback search if path mismatch
+            # Robust fallback: find newest matching audio file created in output_dir
             if not file_path.exists():
-                for p in output_dir.rglob("*" + safe_filename(meta.title, False) + "*"):
-                    if p.is_file() and p.suffix in (".flac", ".opus", ".mp4"):
-                        file_path = p
-                        break
+                audio_candidates = sorted(
+                    [p for p in output_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".flac", ".opus", ".mp4", ".m4a")],
+                    key=lambda x: x.stat().st_mtime,
+                    reverse=True
+                )
+                if audio_candidates:
+                    file_path = audio_candidates[0]
             
             if file_path.exists():
                 return FileResponse(
                     path=str(file_path),
                     media_type="audio/flac",
-                    filename=file_path.name
+                    filename=file_path.name,
+                    headers={"Access-Control-Expose-Headers": "Content-Disposition"}
                 )
+            else:
+                raise HTTPException(status_code=500, detail="Downloaded audio file could not be located on the server.")
 
         display_name = title or asin
         if artist:

@@ -1185,8 +1185,12 @@ async function downloadAmazon(job) {
         const filename = encoded ? decodeURIComponent(encoded) : plain || `${fileSafe(job.track.title)}.flac`;
         saveBlob(blob, filename);
     } else {
-        const result = await response.json();
-        job.message = result.message || "Saved on the server";
+        let errorMsg = "Server did not return an audio stream.";
+        try {
+            const result = await response.json();
+            errorMsg = result.detail || result.message || errorMsg;
+        } catch { /* ignore */ }
+        throw new Error(errorMsg);
     }
 }
 
@@ -1225,10 +1229,13 @@ function saveBlob(blob, filename) {
     const anchor = document.createElement("a");
     anchor.href = objectUrl;
     anchor.download = filename;
+    anchor.rel = "noopener";
     document.body.appendChild(anchor);
     anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+    setTimeout(() => {
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+    }, 60000);
 }
 
 function renderDownloads() {
