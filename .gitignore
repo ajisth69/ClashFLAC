@@ -19,6 +19,7 @@ node_modules/
 frontend/node_modules/
 .vite/
 frontend/.vite/
+.wrangler/
 
 # Python
 __pycache__/
