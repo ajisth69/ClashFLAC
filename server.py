@@ -787,6 +787,17 @@ async def download_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/")
+def root_endpoint():
+    return {
+        "status": "online",
+        "service": "ClashFLAC Lossless API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "Amazon Music API Resolver"}
@@ -798,4 +809,5 @@ def get_public_config():
         "turnstile_site_key": CLOUDFLARE_SITE_KEY,
         "turnstile_enabled": bool(TURNSTILE_SECRET_KEY)
     }
+
 
