@@ -1,0 +1,38 @@
+# Confidential & Secret Files
+.env
+.env.*
+*.env
+*.bin
+*.pem
+*.wvd
+credentials.json
+credentials.bin
+
+# App Configuration & Output Directories
+config/
+downloads/
+output/
+temp-dl/
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+frontend/.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# OS & Temp Files
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+cover.jpg
+cover.png

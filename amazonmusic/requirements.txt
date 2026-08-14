@@ -1,0 +1,17 @@
+# Canonical install: pip install -r requirements.txt (repo root) + requirements-gui.txt
+# Do not pip install this file alone. Listed here for reference / upstream parity.
+
+audible==0.8.2
+beautifulsoup4==4.12.2
+ffmpeg_python==0.2.0
+httpx==0.23.3
+natsort==8.4.0
+pycryptodome==3.19.0
+protobuf==4.25.1
+pywidevine==1.8.0
+rsa==4.9
+tqdm==4.66.1
+xmltodict==0.13.0
+python-dateutil
+brotli
+# bs4: use beautifulsoup4 above (provides `from bs4 import BeautifulSoup`)
