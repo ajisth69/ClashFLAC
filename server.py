@@ -55,70 +55,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("server")
 
-# Cloudflare Turnstile Secret Key configuration
-TURNSTILE_SECRET_KEY = (os.getenv("CLOUDFLARE_SECRET_KEY") or os.getenv("TURNSTILE_SECRET_KEY") or "").strip()
-CLOUDFLARE_SITE_KEY = (os.getenv("CLOUDFLARE_SITE_KEY") or os.getenv("TURNSTILE_SITE_KEY") or "").strip()
-
-if TURNSTILE_SECRET_KEY:
-    logger.info(f"Cloudflare Turnstile bot protection: ENABLED (Site Key: {CLOUDFLARE_SITE_KEY or 'configured'})")
-else:
-    logger.info("Cloudflare Turnstile bot protection: DISABLED (dev mode / bypass)")
+# Cloudflare Turnstile disabled temporarily; Origin Lock active
+TURNSTILE_SECRET_KEY = ""
+CLOUDFLARE_SITE_KEY = ""
+logger.info("Turnstile bot challenge: TEMPORARILY DISABLED (Origin Lock active)")
 
 async def verify_turnstile_token(
     x_turnstile_token: Optional[str] = Header(default=None, alias="X-Turnstile-Token"),
     request: Request = None
 ) -> bool:
-    """
-    Validate Cloudflare Turnstile token against Cloudflare's siteverify API.
-    If TURNSTILE_SECRET_KEY is empty, verification passes automatically.
-    """
-    if not TURNSTILE_SECRET_KEY:
-        return True
-
-    if not x_turnstile_token:
-        logger.warning("Request rejected: missing X-Turnstile-Token header.")
-        raise HTTPException(
-            status_code=403,
-            detail="Cloudflare Turnstile bot challenge required."
-        )
-
-    try:
-        client_ip = None
-        if request:
-            # Check X-Forwarded-For (Cloudflare CF-Connecting-IP)
-            cf_ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For")
-            if cf_ip:
-                client_ip = cf_ip.split(",")[0].strip()
-            elif request.client:
-                client_ip = request.client.host
-
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            payload = {
-                "secret": TURNSTILE_SECRET_KEY,
-                "response": x_turnstile_token,
-            }
-            if client_ip:
-                payload["remoteip"] = client_ip
-
-            res = await client.post(
-                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-                data=payload
-            )
-            data = res.json()
-            if data.get("success"):
-                return True
-            else:
-                error_codes = data.get("error-codes", [])
-                logger.warning(f"Turnstile token verification failed: {error_codes}")
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Turnstile bot verification failed ({', '.join(error_codes) if error_codes else 'invalid token'})."
-                )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error communicating with Cloudflare Turnstile API: {e}")
-        raise HTTPException(status_code=502, detail="Failed to verify bot challenge with Cloudflare.")
+    """Turnstile verification temporarily bypassed."""
+    return True
 
 from amzdl.api.auth import _load_store
 from amzdl.api.amzn_api import AmazonMusicMobileAPI
@@ -132,9 +79,20 @@ app = FastAPI(
     version="2.1.0"
 )
 
+ALLOWED_ORIGINS = [
+    "https://clashflac.pages.dev",
+    "https://clashflac.up.railway.app",
+    "https://clashflac-production.up.railway.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8001",
+    "http://localhost:8001",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.pages\.dev|https://.*\.up\.railway\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

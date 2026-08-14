@@ -163,39 +163,8 @@ window.onTurnstileLoaded = () => {
     initTurnstile();
 };
 
-async function getTurnstileToken(timeoutMs = 3500) {
-    if (!window.turnstile) {
-        for (let i = 0; i < 15 && !window.turnstile; i++) {
-            await new Promise((r) => setTimeout(r, 100));
-        }
-    }
-
-    if (window.turnstile && state.turnstileWidgetId === null) {
-        initTurnstile();
-    }
-
-    if (window.turnstile && state.turnstileWidgetId !== null) {
-        try {
-            const token = window.turnstile.getResponse(state.turnstileWidgetId);
-            if (token) return token;
-        } catch {}
-    }
-
-    if (state.turnstileToken) return state.turnstileToken;
-
-    // Poll briefly for token completion
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-        if (window.turnstile && state.turnstileWidgetId !== null) {
-            try {
-                const token = window.turnstile.getResponse(state.turnstileWidgetId);
-                if (token) return token;
-            } catch {}
-        }
-        if (state.turnstileToken) return state.turnstileToken;
-        await new Promise((r) => setTimeout(r, 150));
-    }
-
+async function getTurnstileToken() {
+    // Turnstile bypassed temporarily per Origin Lock mode
     return state.turnstileToken || "";
 }
 
