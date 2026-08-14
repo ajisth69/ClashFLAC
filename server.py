@@ -17,6 +17,8 @@ import xmltodict
 import asyncio
 import logging
 import httpx
+import shutil
+import gc
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -24,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Query, Header, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from amzdl.utils import safe_filename, build_output_filename
@@ -137,6 +140,53 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+def cleanup_download_artifact(file_path: Path, output_dir: Path):
+    """
+    Safely delete streamed file and any empty directories from downloads/,
+    followed by garbage collection to immediately free container memory.
+    """
+    try:
+        if file_path and file_path.is_file():
+            file_path.unlink(missing_ok=True)
+            logger.info(f"Cleaned up streamed audio file: {file_path.name}")
+        
+        # Remove empty parent directories up to output_dir
+        if file_path and output_dir:
+            parent = file_path.parent
+            while parent != output_dir and parent.exists():
+                try:
+                    parent.rmdir()
+                    parent = parent.parent
+                except OSError:
+                    break
+    except Exception as e:
+        logger.warning(f"Error during artifact cleanup: {e}")
+    
+    # Force garbage collection to release cached buffers in Linux container
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+def purge_stale_downloads():
+    """Purge stale files from downloads directory on startup."""
+    try:
+        dl_dir = Path("downloads").resolve()
+        if dl_dir.exists():
+            for item in dl_dir.iterdir():
+                if item.name == ".gitkeep":
+                    continue
+                if item.is_file():
+                    item.unlink(missing_ok=True)
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+            logger.info("Purged stale download artifacts from disk on startup.")
+    except Exception as e:
+        logger.warning(f"Startup purge failed: {e}")
 
 
 class ResolveRequest(BaseModel):
@@ -776,7 +826,8 @@ async def download_endpoint(
                     path=str(file_path),
                     media_type="audio/flac",
                     filename=file_path.name,
-                    headers={"Access-Control-Expose-Headers": "Content-Disposition"}
+                    headers={"Access-Control-Expose-Headers": "Content-Disposition"},
+                    background=BackgroundTask(cleanup_download_artifact, file_path, output_dir)
                 )
             else:
                 raise HTTPException(status_code=500, detail="Downloaded audio file could not be located on the server.")
