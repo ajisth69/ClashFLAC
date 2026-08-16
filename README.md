@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/License-MIT-blueviolet?style=for-the-badge" alt="License" />
 </p>
 
-[Live Web App](https://clashflac.pages.dev) &bull; [API Service](https://clashflac.up.railway.app) &bull; [Documentation](https://clashflac.up.railway.app/docs)
+[Live Web App](https://clashflac.pages.dev) &bull; [API Service](https://clashflac-production.up.railway.app) &bull; [Documentation](https://clashflac-production.up.railway.app/docs)
 
 </div>
 

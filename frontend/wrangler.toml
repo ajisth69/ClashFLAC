@@ -1,0 +1,8 @@
+name = "clashflac"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "dist"
+
+[vars]
+BACKEND_API_BASE = "https://clashflac-production.up.railway.app"
+API_BASE_URL = "https://clashflac-production.up.railway.app"
+DEFAULT_API_BASE = "https://clashflac-production.up.railway.app"

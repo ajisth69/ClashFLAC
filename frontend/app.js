@@ -1,8 +1,14 @@
-const DEFAULT_API_BASE = "https://clashflac.up.railway.app";
+const DEFAULT_API_BASE = "https://clashflac-production.up.railway.app";
 const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 
+const savedApi = localStorage.getItem("clash-api-base");
+const activeApi = (!savedApi || savedApi === "https://clashflac.up.railway.app") ? DEFAULT_API_BASE : savedApi;
+if (savedApi === "https://clashflac.up.railway.app") {
+    localStorage.setItem("clash-api-base", DEFAULT_API_BASE);
+}
+
 const state = {
-    apiBase: localStorage.getItem("clash-api-base") || DEFAULT_API_BASE,
+    apiBase: activeApi,
     quality: localStorage.getItem("clash-quality") || "UHD",
     theme: localStorage.getItem("clash-theme") || "light",
     results: [],
