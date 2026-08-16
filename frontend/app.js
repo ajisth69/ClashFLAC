@@ -5,7 +5,7 @@ const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 const savedApi = localStorage.getItem("clash-api-base");
 const activeApi = isLocalDev
   ? DEFAULT_API_BASE
-  : ((!savedApi || savedApi === "https://clashflac.up.railway.app" || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
+  : ((!savedApi || savedApi === "https://clashflac.up.railway.app" || savedApi.startsWith("https://clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
 
 const state = {
     apiBase: activeApi,
