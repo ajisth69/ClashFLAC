@@ -167,10 +167,14 @@ async def browser_guard_middleware(request: Request, call_next):
             return JSONResponse(status_code=403, content={"detail": "Invalid handshake timestamp."})
 
         # Single-use nonce protection to prevent curl/bot replay attacks
+        # Single-use nonce protection to prevent curl/bot replay attacks
         now_sec = time.time()
-        expired_keys = [k for k, exp in USED_NONCES.items() if exp < now_sec]
-        for k in expired_keys:
-            USED_NONCES.pop(k, None)
+        if len(USED_NONCES) > 1000:
+            expired_keys = [k for k, exp in USED_NONCES.items() if exp < now_sec]
+            for k in expired_keys:
+                USED_NONCES.pop(k, None)
+            if len(USED_NONCES) > 5000:
+                USED_NONCES.clear()
 
         if clash_nonce in USED_NONCES:
             return JSONResponse(
@@ -193,10 +197,29 @@ async def browser_guard_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
+
+
+def free_memory():
+    """
+    Force Python garbage collection and release memory back to the OS
+    via malloc_trim on Linux container environments.
+    """
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def cleanup_download_artifact(file_path: Path, output_dir: Path):
     """
     Safely delete streamed file and any empty directories from downloads/,
-    followed by garbage collection to immediately free container memory.
+    followed by immediate garbage collection to release OS RAM.
     """
     try:
         if file_path and file_path.is_file():
@@ -214,17 +237,12 @@ def cleanup_download_artifact(file_path: Path, output_dir: Path):
                     break
     except Exception as e:
         logger.warning(f"Error during artifact cleanup: {e}")
-    
-    # Force garbage collection to release cached buffers in Linux container
-    try:
-        gc.collect()
-    except Exception:
-        pass
+    finally:
+        free_memory()
 
 
-@app.on_event("startup")
 def purge_stale_downloads():
-    """Purge stale files from downloads directory on startup."""
+    """Purge stale files from downloads directory."""
     try:
         dl_dir = Path("downloads").resolve()
         if dl_dir.exists():
@@ -235,9 +253,53 @@ def purge_stale_downloads():
                     item.unlink(missing_ok=True)
                 elif item.is_dir():
                     shutil.rmtree(item, ignore_errors=True)
-            logger.info("Purged stale download artifacts from disk on startup.")
+            logger.info("Purged stale download artifacts from disk.")
     except Exception as e:
-        logger.warning(f"Startup purge failed: {e}")
+        logger.warning(f"Purge failed: {e}")
+    finally:
+        free_memory()
+
+
+async def periodic_disk_cleaner():
+    """
+    Background worker running every 60s that sweeps orphaned files/folders
+    in downloads/ older than 180s to prevent disk leaks and memory exhaustion.
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)
+            dl_dir = Path("downloads").resolve()
+            if not dl_dir.exists():
+                continue
+            now = time.time()
+            for root, dirs, files in os.walk(str(dl_dir), topdown=False):
+                for f in files:
+                    if f == ".gitkeep":
+                        continue
+                    fp = Path(root) / f
+                    try:
+                        if fp.is_file() and (now - fp.stat().st_mtime > 180):
+                            fp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                for d in dirs:
+                    dp = Path(root) / d
+                    try:
+                        if dp.is_dir() and not any(dp.iterdir()):
+                            dp.rmdir()
+                    except Exception:
+                        pass
+            free_memory()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Periodic disk cleaner error: {e}")
+
+
+@app.on_event("startup")
+async def startup_tasks():
+    purge_stale_downloads()
+    asyncio.create_task(periodic_disk_cleaner())
 
 
 class ResolveRequest(BaseModel):
@@ -727,7 +789,7 @@ async def resolve_endpoint(
     await verify_turnstile_token(x_turnstile_token, request)
     try:
         resolved_input = await resolve_external_url(req.input)
-        return resolver.resolve(resolved_input, quality=req.quality or "HD")
+        return await asyncio.to_thread(resolver.resolve, resolved_input, quality=req.quality or "HD")
     except HTTPException:
         raise
     except Exception as e:
@@ -751,7 +813,7 @@ async def search_endpoint(
                     query = resolved
             except Exception as e:
                 logger.warning(f"Failed to resolve URL query in search_endpoint: {e}")
-        return resolver.search(query, limit=limit)
+        return await asyncio.to_thread(resolver.search, query, limit=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -773,7 +835,7 @@ async def spotify_search_endpoint(
 
 
 @app.get("/api/resolve")
-async def resolve_endpoint(q: str):
+async def resolve_query_endpoint(q: str):
     """
     Resolve YouTube/Spotify links to a clean text search query.
     """
@@ -791,120 +853,125 @@ async def download_endpoint(
     request: Request = None
 ):
     """
-    Download, decrypt, and save Amazon Music tracks locally.
+    Download, decrypt, and save Amazon Music tracks locally with strict concurrency control.
     """
     await verify_turnstile_token(x_turnstile_token, request)
-    try:
-        resolved_input = await resolve_external_url(req.input)
-        input_str = resolved_input.strip()
+    async with DOWNLOAD_SEMAPHORE:
+        try:
+            resolved_input = await resolve_external_url(req.input)
+            input_str = resolved_input.strip()
 
-        # Extract ASIN from link or raw input
-        asin = input_str
-        match = re.search(r'(?:trackAsin=|albums/|tracks/)([A-Z0-9]{10})', input_str, re.IGNORECASE)
-        if match:
-            asin = match.group(1)
-        elif not re.match(r'^[A-Z0-9]{10}$', input_str, re.IGNORECASE):
-            # If plain text query, search Amazon catalog first
-            search_hits = resolver.search(input_str, limit=1)
-            if not search_hits:
-                raise HTTPException(status_code=404, detail=f"Track '{input_str}' not found on Amazon Music")
-            asin = search_hits[0].asin
+            # Extract ASIN from link or raw input
+            asin = input_str
+            match = re.search(r'(?:trackAsin=|albums/|tracks/)([A-Z0-9]{10})', input_str, re.IGNORECASE)
+            if match:
+                asin = match.group(1)
+            elif not re.match(r'^[A-Z0-9]{10}$', input_str, re.IGNORECASE):
+                # If plain text query, search Amazon catalog first
+                search_hits = await asyncio.to_thread(resolver.search, input_str, limit=1)
+                if not search_hits:
+                    raise HTTPException(status_code=404, detail=f"Track '{input_str}' not found on Amazon Music")
+                asin = search_hits[0].asin
 
-        # Fetch metadata using fetch_metadata
-        kind, meta = await asyncio.to_thread(fetch_metadata, resolver.session, asin)
+            # Fetch metadata using fetch_metadata in worker thread
+            kind, meta = await asyncio.to_thread(fetch_metadata, resolver.session, asin)
 
-        title = None
-        artist = None
-        album = None
-        track_count = None
+            title = None
+            artist = None
+            album = None
+            track_count = None
 
-        if kind == "track":
-            title = getattr(meta, "title", None)
-            artist = getattr(meta, "artist", None)
-            album = getattr(meta, "album_name", None)
-        elif kind == "album":
-            title = getattr(meta, "album_name", None)
-            artist = getattr(meta, "artist", None)
-            album = getattr(meta, "album_name", None)
-            track_count = len(getattr(meta, "tracks", []))
-        elif kind == "playlist":
-            title = getattr(meta, "name", None)
-            artist = "Various Artists"
-            track_count = len(getattr(meta, "track_asins", []))
-        elif kind == "artist":
-            title = getattr(meta, "name", None)
-            artist = getattr(meta, "name", None)
-            track_count = len(getattr(meta, "album_asins", []))
+            if kind == "track":
+                title = getattr(meta, "title", None)
+                artist = getattr(meta, "artist", None)
+                album = getattr(meta, "album_name", None)
+            elif kind == "album":
+                title = getattr(meta, "album_name", None)
+                artist = getattr(meta, "artist", None)
+                album = getattr(meta, "album_name", None)
+                track_count = len(getattr(meta, "tracks", []))
+            elif kind == "playlist":
+                title = getattr(meta, "name", None)
+                artist = "Various Artists"
+                track_count = len(getattr(meta, "track_asins", []))
+            elif kind == "artist":
+                title = getattr(meta, "name", None)
+                artist = getattr(meta, "name", None)
+                track_count = len(getattr(meta, "album_asins", []))
 
-        # Set output directory to "downloads"
-        output_dir = Path("downloads").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+            # Set output directory to "downloads"
+            output_dir = Path("downloads").resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        quality_target = (req.quality or "UHD").upper()
-        if quality_target not in {"HD", "UHD"}:
-            raise HTTPException(status_code=422, detail="Quality must be either HD or UHD")
+            quality_target = (req.quality or "UHD").upper()
+            if quality_target not in {"HD", "UHD"}:
+                raise HTTPException(status_code=422, detail="Quality must be either HD or UHD")
 
-        await amzdl_download(
-            session=resolver.session,
-            asin=asin,
-            output_dir=output_dir,
-            quality=quality_target,
-            plain=True
-        )
+            await amzdl_download(
+                session=resolver.session,
+                asin=asin,
+                output_dir=output_dir,
+                quality=quality_target,
+                plain=True,
+                concurrency=2,
+                metadata_concurrency=4
+            )
 
-        # For single track downloads, return the file directly to the browser
-        if kind == "track":
-            extension = ".flac"
-            
-            safe_artist = safe_filename(getattr(meta, "album_artist", None) or getattr(meta, "artist", None), False)
-            safe_album = safe_filename(getattr(meta, "album_name", None), False)
-            out_name = build_output_filename(str(getattr(meta, "disc", "1")), getattr(meta, "track_number", 1), getattr(meta, "title", "track"))
-            
-            file_path = output_dir / safe_artist / safe_album / (out_name + extension)
-            
-            # Robust fallback: find newest matching audio file created in output_dir
-            if not file_path.exists():
-                audio_candidates = sorted(
-                    [p for p in output_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".flac", ".opus", ".mp4", ".m4a")],
-                    key=lambda x: x.stat().st_mtime,
-                    reverse=True
-                )
-                if audio_candidates:
-                    file_path = audio_candidates[0]
-            
-            if file_path.exists():
-                return FileResponse(
-                    path=str(file_path),
-                    media_type="audio/flac",
-                    filename=file_path.name,
-                    headers={"Access-Control-Expose-Headers": "Content-Disposition"},
-                    background=BackgroundTask(cleanup_download_artifact, file_path, output_dir)
-                )
+            # For single track downloads, return the file directly to the browser
+            if kind == "track":
+                extension = ".flac"
+                
+                safe_artist = safe_filename(getattr(meta, "album_artist", None) or getattr(meta, "artist", None), False)
+                safe_album = safe_filename(getattr(meta, "album_name", None), False)
+                out_name = build_output_filename(str(getattr(meta, "disc", "1")), getattr(meta, "track_number", 1), getattr(meta, "title", "track"))
+                
+                file_path = output_dir / safe_artist / safe_album / (out_name + extension)
+                
+                # Robust fallback: find newest matching audio file created in output_dir
+                if not file_path.exists():
+                    audio_candidates = sorted(
+                        [p for p in output_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".flac", ".opus", ".mp4", ".m4a")],
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True
+                    )
+                    if audio_candidates:
+                        file_path = audio_candidates[0]
+                
+                if file_path.exists():
+                    return FileResponse(
+                        path=str(file_path),
+                        media_type="audio/flac",
+                        filename=file_path.name,
+                        headers={"Access-Control-Expose-Headers": "Content-Disposition"},
+                        background=BackgroundTask(cleanup_download_artifact, file_path, output_dir)
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail="Downloaded audio file could not be located on the server.")
+
+            display_name = title or asin
+            if artist:
+                message = f"Successfully downloaded '{display_name}' by {artist}"
             else:
-                raise HTTPException(status_code=500, detail="Downloaded audio file could not be located on the server.")
+                message = f"Successfully downloaded {kind} '{display_name}'"
 
-        display_name = title or asin
-        if artist:
-            message = f"Successfully downloaded '{display_name}' by {artist}"
-        else:
-            message = f"Successfully downloaded {kind} '{display_name}'"
-
-        return DownloadResponse(
-            status="success",
-            message=message,
-            asin=asin,
-            output_dir=str(output_dir),
-            type=kind,
-            title=title,
-            artist=artist,
-            album=album,
-            track_count=track_count
-        )
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.exception("Failed to download track/album")
-        raise HTTPException(status_code=500, detail=str(e))
+            return DownloadResponse(
+                status="success",
+                message=message,
+                asin=asin,
+                output_dir=str(output_dir),
+                type=kind,
+                title=title,
+                artist=artist,
+                album=album,
+                track_count=track_count
+            )
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            logger.exception("Failed to download track/album")
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            free_memory()
 
 
 @app.get("/health")

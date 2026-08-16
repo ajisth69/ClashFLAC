@@ -10,6 +10,8 @@ durations, and drops `mvex`. AC-4: writes the raw `.ac4` elementary stream,
 wrapping each sample in an `0xAC40` sync frame (syncword + frame size). All
 reuse the MP4 box/sample parsing from `mp4`."""
 
+import contextlib
+import mmap
 import struct
 
 from amzdl.remux.mp4 import (
@@ -80,14 +82,15 @@ def _iter_samples(buf, end):
             pending_moof = None
 
 
-def _read_mp4(src_mp4):
+@contextlib.contextmanager
+def _open_mp4(src_mp4):
     with open(src_mp4, "rb") as f:
-        buf = f.read()
-    end = len(buf)
-    moov = find_box(buf, 0, end, b"moov")
-    if moov is None:
-        raise RemuxError("no moov box found")
-    return buf, end, moov
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as buf:
+            end = len(buf)
+            moov = find_box(buf, 0, end, b"moov")
+            if moov is None:
+                raise RemuxError("no moov box found")
+            yield buf, end, moov
 
 
 def _normalize_metadata(blocks):
@@ -111,20 +114,21 @@ def _normalize_metadata(blocks):
 
 
 def remux_flac(src_mp4, dst):
-    buf, end, moov = _read_mp4(src_mp4)
-    dfla = _codec_box(buf, moov[1], moov[2], b"dfLa")
-    if dfla is None:
-        raise RemuxError("no dfLa box found (track is not FLAC)")
-    metadata = _normalize_metadata(buf[dfla[1] + 4 : dfla[2]])
-    written = 0
-    with open(dst, "wb") as out:
-        out.write(_FLAC_MAGIC)
-        out.write(metadata)
-        for pos, size, _dur in _iter_samples(buf, end):
-            out.write(buf[pos : pos + size])
-            written += 1
-    if written == 0:
-        raise RemuxError("no audio samples found")
+    with _open_mp4(src_mp4) as (buf, end, moov):
+        dfla = _codec_box(buf, moov[1], moov[2], b"dfLa")
+        if dfla is None:
+            raise RemuxError("no dfLa box found (track is not FLAC)")
+        metadata = _normalize_metadata(buf[dfla[1] + 4 : dfla[2]])
+        written = 0
+        mv = memoryview(buf)
+        with open(dst, "wb", buffering=1024 * 1024) as out:
+            out.write(_FLAC_MAGIC)
+            out.write(metadata)
+            for pos, size, _dur in _iter_samples(buf, end):
+                out.write(mv[pos : pos + size])
+                written += 1
+        if written == 0:
+            raise RemuxError("no audio samples found")
     return dst
 
 
@@ -222,18 +226,19 @@ def _write_ogg_opus(out, head, preskip, samples):
 
 
 def remux_opus(src_mp4, dst):
-    buf, end, moov = _read_mp4(src_mp4)
-    dops = _codec_box(buf, moov[1], moov[2], b"dOps")
-    if dops is None:
-        raise RemuxError("no dOps box found (track is not Opus)")
-    head, preskip = _opus_head(buf[dops[1] : dops[2]])
-    samples = [
-        (buf[pos : pos + size], dur) for pos, size, dur in _iter_samples(buf, end)
-    ]
-    if not samples:
-        raise RemuxError("no audio samples found")
-    with open(dst, "wb") as out:
-        _write_ogg_opus(out, head, preskip, samples)
+    with _open_mp4(src_mp4) as (buf, end, moov):
+        dops = _codec_box(buf, moov[1], moov[2], b"dOps")
+        if dops is None:
+            raise RemuxError("no dOps box found (track is not Opus)")
+        head, preskip = _opus_head(buf[dops[1] : dops[2]])
+        mv = memoryview(buf)
+        samples = [
+            (bytes(mv[pos : pos + size]), dur) for pos, size, dur in _iter_samples(buf, end)
+        ]
+        if not samples:
+            raise RemuxError("no audio samples found")
+        with open(dst, "wb", buffering=1024 * 1024) as out:
+            _write_ogg_opus(out, head, preskip, samples)
     return dst
 
 
@@ -324,65 +329,66 @@ def _build_stsd(buf, stsd):
 
 
 def remux_mp4(src_mp4, dst):
-    buf, end, moov = _read_mp4(src_mp4)
-    mvhd = find_box(buf, moov[1], moov[2], b"mvhd")
-    trak = find_box(buf, moov[1], moov[2], b"trak")
-    if mvhd is None or trak is None:
-        raise RemuxError("no mvhd/trak in moov")
-    mdia = find_box(buf, trak[1], trak[2], b"mdia")
-    tkhd = find_box(buf, trak[1], trak[2], b"tkhd")
-    minf = find_box(buf, mdia[1], mdia[2], b"minf") if mdia else None
-    mdhd = find_box(buf, mdia[1], mdia[2], b"mdhd") if mdia else None
-    stbl = find_box(buf, minf[1], minf[2], b"stbl") if minf else None
-    stsd = find_box(buf, stbl[1], stbl[2], b"stsd") if stbl else None
-    if not all((mdia, tkhd, minf, mdhd, stbl, stsd)):
-        raise RemuxError("incomplete moov structure for mp4 flatten")
+    with _open_mp4(src_mp4) as (buf, end, moov):
+        mvhd = find_box(buf, moov[1], moov[2], b"mvhd")
+        trak = find_box(buf, moov[1], moov[2], b"trak")
+        if mvhd is None or trak is None:
+            raise RemuxError("no mvhd/trak in moov")
+        mdia = find_box(buf, trak[1], trak[2], b"mdia")
+        tkhd = find_box(buf, trak[1], trak[2], b"tkhd")
+        minf = find_box(buf, mdia[1], mdia[2], b"minf") if mdia else None
+        mdhd = find_box(buf, mdia[1], mdia[2], b"mdhd") if mdia else None
+        stbl = find_box(buf, minf[1], minf[2], b"stbl") if minf else None
+        stsd = find_box(buf, stbl[1], stbl[2], b"stsd") if stbl else None
+        if not all((mdia, tkhd, minf, mdhd, stbl, stsd)):
+            raise RemuxError("incomplete moov structure for mp4 flatten")
 
-    sizes = []
-    durs = []
-    for _pos, size, dur in _iter_samples(buf, end):
-        sizes.append(size)
-        durs.append(dur)
-    if not sizes:
-        raise RemuxError("no audio samples found")
+        sizes = []
+        durs = []
+        for _pos, size, dur in _iter_samples(buf, end):
+            sizes.append(size)
+            durs.append(dur)
+        if not sizes:
+            raise RemuxError("no audio samples found")
 
-    media_dur = sum(durs)
-    movie_ts = _box_timescale(buf[mvhd[0] : mvhd[2]])
-    media_ts = _box_timescale(buf[mdhd[0] : mdhd[2]])
-    movie_dur = round(media_dur * movie_ts / media_ts) if media_ts else media_dur
+        media_dur = sum(durs)
+        movie_ts = _box_timescale(buf[mvhd[0] : mvhd[2]])
+        media_ts = _box_timescale(buf[mdhd[0] : mdhd[2]])
+        movie_dur = round(media_dur * movie_ts / media_ts) if media_ts else media_dur
 
-    stbl_content = (
-        _build_stsd(buf, stsd)
-        + _build_stts(durs)
-        + _full_box(b"stsc", 0, 0, struct.pack(">IIII", 1, 1, len(sizes), 1))
-        + _build_stsz(sizes)
-        + _full_box(b"stco", 0, 0, struct.pack(">II", 1, 0))
-    )
-    new_stbl = _box(b"stbl", stbl_content)
-    new_minf = _box(b"minf", _rebuild(buf, minf[1], minf[2], {b"stbl": new_stbl}))
-    new_mdia = _box(b"mdia", _rebuild(buf, mdia[1], mdia[2], {
-        b"minf": new_minf,
-        b"mdhd": _patch_duration(buf[mdhd[0] : mdhd[2]], 24, 32, media_dur),
-    }))
-    new_trak = _box(b"trak", _rebuild(buf, trak[1], trak[2], {
-        b"mdia": new_mdia,
-        b"tkhd": _patch_duration(buf[tkhd[0] : tkhd[2]], 28, 36, movie_dur),
-    }))
-    new_moov = bytearray(_box(b"moov", _rebuild(buf, moov[1], moov[2], {
-        b"mvhd": _patch_duration(buf[mvhd[0] : mvhd[2]], 24, 32, movie_dur),
-        b"trak": new_trak,
-    }, drop=(b"mvex", b"pssh"))))
+        stbl_content = (
+            _build_stsd(buf, stsd)
+            + _build_stts(durs)
+            + _full_box(b"stsc", 0, 0, struct.pack(">IIII", 1, 1, len(sizes), 1))
+            + _build_stsz(sizes)
+            + _full_box(b"stco", 0, 0, struct.pack(">II", 1, 0))
+        )
+        new_stbl = _box(b"stbl", stbl_content)
+        new_minf = _box(b"minf", _rebuild(buf, minf[1], minf[2], {b"stbl": new_stbl}))
+        new_mdia = _box(b"mdia", _rebuild(buf, mdia[1], mdia[2], {
+            b"minf": new_minf,
+            b"mdhd": _patch_duration(buf[mdhd[0] : mdhd[2]], 24, 32, media_dur),
+        }))
+        new_trak = _box(b"trak", _rebuild(buf, trak[1], trak[2], {
+            b"mdia": new_mdia,
+            b"tkhd": _patch_duration(buf[tkhd[0] : tkhd[2]], 28, 36, movie_dur),
+        }))
+        new_moov = bytearray(_box(b"moov", _rebuild(buf, moov[1], moov[2], {
+            b"mvhd": _patch_duration(buf[mvhd[0] : mvhd[2]], 24, 32, movie_dur),
+            b"trak": new_trak,
+        }, drop=(b"mvex", b"pssh"))))
 
-    mdat_offset = len(_MP4_FTYP) + len(new_moov) + 8
-    stco_off = new_moov.rfind(b"stco")
-    struct.pack_into(">I", new_moov, stco_off + 12, mdat_offset)
+        mdat_offset = len(_MP4_FTYP) + len(new_moov) + 8
+        stco_off = new_moov.rfind(b"stco")
+        struct.pack_into(">I", new_moov, stco_off + 12, mdat_offset)
 
-    with open(dst, "wb") as out:
-        out.write(_MP4_FTYP)
-        out.write(new_moov)
-        out.write(struct.pack(">I", sum(sizes) + 8) + b"mdat")
-        for pos, size, _dur in _iter_samples(buf, end):
-            out.write(buf[pos : pos + size])
+        with open(dst, "wb", buffering=1024 * 1024) as out:
+            out.write(_MP4_FTYP)
+            out.write(new_moov)
+            out.write(struct.pack(">I", sum(sizes) + 8) + b"mdat")
+            mv = memoryview(buf)
+            for pos, size, _dur in _iter_samples(buf, end):
+                out.write(mv[pos : pos + size])
     return dst
 
 
@@ -390,17 +396,18 @@ _AC4_SYNCWORD = b"\xac\x40"
 
 
 def remux_ac4(src_mp4, dst):
-    buf, end, moov = _read_mp4(src_mp4)
-    written = 0
-    with open(dst, "wb") as out:
-        for pos, size, _dur in _iter_samples(buf, end):
-            out.write(_AC4_SYNCWORD)
-            if size < 0xFFFF:
-                out.write(struct.pack(">H", size))
-            else:
-                out.write(b"\xff\xff" + size.to_bytes(3, "big"))
-            out.write(buf[pos : pos + size])
-            written += 1
-    if written == 0:
-        raise RemuxError("no audio samples found")
+    with _open_mp4(src_mp4) as (buf, end, moov):
+        written = 0
+        mv = memoryview(buf)
+        with open(dst, "wb", buffering=1024 * 1024) as out:
+            for pos, size, _dur in _iter_samples(buf, end):
+                out.write(_AC4_SYNCWORD)
+                if size < 0xFFFF:
+                    out.write(struct.pack(">H", size))
+                else:
+                    out.write(b"\xff\xff" + size.to_bytes(3, "big"))
+                out.write(mv[pos : pos + size])
+                written += 1
+        if written == 0:
+            raise RemuxError("no audio samples found")
     return dst

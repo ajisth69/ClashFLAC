@@ -73,12 +73,12 @@ _DOWNLOAD_CHUNK = 1024 * 1024
 
 
 def download_full_file(base_url: str, output_path):
-    r = requests.get(base_url, stream=True)
+    r = requests.get(base_url, stream=True, timeout=30)
     if r.status_code != 200:
         _log.error("download failed. Status code: %s", r.status_code)
         return None
     r.raw.decode_content = True
-    with open(output_path, "wb") as f:
+    with open(output_path, "wb", buffering=1024 * 1024) as f:
         shutil.copyfileobj(r.raw, f, length=_DOWNLOAD_CHUNK)
     return output_path
 
@@ -151,51 +151,65 @@ async def process_track(
         )
         return download_artwork(url, str(temp_dir))
 
-    step("downloading track")
-    coros = [
-        asyncio.to_thread(
-            Keys.getContentKeys, session, track.asin, rep["pssh"], wvd_path
-        ),
-        asyncio.to_thread(download_full_file, rep["base_url"], encrypted_file),
-        asyncio.to_thread(fetch_cover),
-        asyncio.to_thread(_fetch_credits, session, track.asin),
-    ]
-    fetch_lyrics = lyrics_resp is None
-    if fetch_lyrics:
-        coros.append(asyncio.to_thread(session.get_track_lyrics, track.asin))
-    results = await asyncio.gather(*coros)
-    content_key = results[0]
-    artwork_path = results[2]
-    credits = results[3]
-    if fetch_lyrics:
-        lyrics_resp = results[4]
-
-    step("decrypting")
-    decrypted_mp4 = temp_dir / "decrypted_temp.mp4"
     try:
-        await asyncio.to_thread(decrypt_mp4, encrypted_file, content_key, decrypted_mp4)
-    except Exception:
-        _log.error("decryption failed for %s", track.title, exc_info=True)
+        step("downloading track")
+        coros = [
+            asyncio.to_thread(
+                Keys.getContentKeys, session, track.asin, rep["pssh"], wvd_path
+            ),
+            asyncio.to_thread(download_full_file, rep["base_url"], encrypted_file),
+            asyncio.to_thread(fetch_cover),
+            asyncio.to_thread(_fetch_credits, session, track.asin),
+        ]
+        fetch_lyrics = lyrics_resp is None
+        if fetch_lyrics:
+            coros.append(asyncio.to_thread(session.get_track_lyrics, track.asin))
+        results = await asyncio.gather(*coros)
+        content_key = results[0]
+        artwork_path = results[2]
+        credits = results[3]
+        if fetch_lyrics:
+            lyrics_resp = results[4]
+
+        if not encrypted_file.exists():
+            _log.error("encrypted file download failed for %s", track.title)
+            return
+
+        step("decrypting")
+        decrypted_mp4 = temp_dir / "decrypted_temp.mp4"
+        try:
+            await asyncio.to_thread(decrypt_mp4, encrypted_file, content_key, decrypted_mp4)
+        except Exception:
+            _log.error("decryption failed for %s", track.title, exc_info=True)
+            return
+        finally:
+            encrypted_file.unlink(missing_ok=True)
+
+        step(f"remuxing to {extension.lstrip('.')}")
+        media_temp = temp_dir / ("decoded_temp" + extension)
+        try:
+            await asyncio.to_thread(remux_copy, decrypted_mp4, media_temp)
+        finally:
+            decrypted_mp4.unlink(missing_ok=True)
+
+        step("tagging metadata")
+        lyrics_obj = Lyrics.from_xray(lyrics_resp)
+        await asyncio.to_thread(
+            tag_track, str(media_temp), track, lyrics_obj, str(temp_dir), tag_mode,
+            artwork_path,
+            _track_url(session, track), credits, rep.get("reference_loudness"),
+        )
+
+        track_output_dir.mkdir(parents=True, exist_ok=True)
+        media_temp.rename(output_file)
+        _log.info("saved to: %s", output_file)
+    finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return
-
-    step(f"remuxing to {extension.lstrip('.')}")
-    media_temp = temp_dir / ("decoded_temp" + extension)
-    await asyncio.to_thread(remux_copy, decrypted_mp4, media_temp)
-
-    step("tagging metadata")
-    lyrics_obj = Lyrics.from_xray(lyrics_resp)
-    await asyncio.to_thread(
-        tag_track, str(media_temp), track, lyrics_obj, str(temp_dir), tag_mode,
-        artwork_path,
-        _track_url(session, track), credits, rep.get("reference_loudness"),
-    )
-
-    track_output_dir.mkdir(parents=True, exist_ok=True)
-    media_temp.rename(output_file)
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-    _log.info("saved to: %s", output_file)
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
 
 
 async def fetch_track(

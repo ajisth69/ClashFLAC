@@ -4,6 +4,8 @@ content key, renaming the encryption-signalling boxes to `free` so no byte ever
 moves."""
 
 import logging
+import mmap
+import shutil
 import struct
 
 from Crypto.Cipher import AES
@@ -180,34 +182,37 @@ def decrypt_mp4(encrypted_path, key, output_path):
     key_hex = key.split(":")[-1].strip()
     key_bytes = bytes.fromhex(key_hex)
 
-    with open(encrypted_path, "rb") as f:
-        buf = bytearray(f.read())
-    end = len(buf)
+    # Fast streaming copy to output destination (minimal RAM footprint)
+    shutil.copyfile(encrypted_path, output_path)
 
-    moov = find_box(buf, 0, end, b"moov")
-    if moov is None:
-        raise DecryptError("no moov box found")
-    iv_size, constant_iv = _prepare_moov(buf, moov[1], moov[2])
+    with open(output_path, "r+b") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE) as buf:
+            end = len(buf)
 
-    fragment_count = 0
-    pending_moof = None
-    for btype, box_start, content_start, box_end in iter_boxes(buf, 0, end):
-        if btype == b"moof":
-            pending_moof = (box_start, content_start, box_end)
-        elif btype == b"mdat" and pending_moof is not None:
-            moof_start, moof_content, moof_end = pending_moof
-            for tb, ts, tc, te in iter_boxes(buf, moof_content, moof_end):
-                if tb == b"traf":
-                    _process_traf(
-                        buf, ts, tc, te, moof_start, iv_size, constant_iv, key_bytes
-                    )
-            fragment_count += 1
+            moov = find_box(buf, 0, end, b"moov")
+            if moov is None:
+                raise DecryptError("no moov box found")
+            iv_size, constant_iv = _prepare_moov(buf, moov[1], moov[2])
+
+            fragment_count = 0
             pending_moof = None
+            for btype, box_start, content_start, box_end in iter_boxes(buf, 0, end):
+                if btype == b"moof":
+                    pending_moof = (box_start, content_start, box_end)
+                elif btype == b"mdat" and pending_moof is not None:
+                    moof_start, moof_content, moof_end = pending_moof
+                    for tb, ts, tc, te in iter_boxes(buf, moof_content, moof_end):
+                        if tb == b"traf":
+                            _process_traf(
+                                buf, ts, tc, te, moof_start, iv_size, constant_iv, key_bytes
+                            )
+                    fragment_count += 1
+                    pending_moof = None
 
-    if fragment_count == 0:
-        raise DecryptError("no moof/mdat fragments found to decrypt")
+            if fragment_count == 0:
+                raise DecryptError("no moof/mdat fragments found to decrypt")
 
-    with open(output_path, "wb") as f:
-        f.write(buf)
+            buf.flush()
+
     _log.debug("decrypted %s fragment(s) -> %s", fragment_count, output_path)
     return output_path
