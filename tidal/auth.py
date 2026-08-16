@@ -28,19 +28,18 @@ class TidalAuth:
         """
         Load tokens from .env, TIDAL_CREDENTIALS_BASE64, or config/tidal_tokens.json
         """
-        # 1. Check direct environment variables
-        env_access = os.getenv("TIDAL_ACCESS_TOKEN")
-        env_refresh = os.getenv("TIDAL_REFRESH_TOKEN")
-        if env_access:
-            self.user_access_token = env_access.strip()
-            self.user_refresh_token = env_refresh.strip() if env_refresh else None
-            self.user_id = os.getenv("TIDAL_USER_ID", "user")
-            self.user_country_code = os.getenv("TIDAL_COUNTRY_CODE", TidalConfig.DEFAULT_COUNTRY_CODE)
-            self.user_token_expiry = time.time() + 86400 * 30  # Default 30 days
-            logger.info("Loaded Tidal credentials from environment variables.")
-            return True
+        # 1. Check JSON token file (most up-to-date from device OAuth)
+        token_path = TidalConfig.TOKEN_FILE
+        if token_path.exists():
+            try:
+                data = json.loads(token_path.read_text(encoding="utf-8"))
+                self._apply_token_dict(data)
+                logger.info(f"Loaded Tidal credentials from {token_path}.")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed loading {token_path}: {e}")
 
-        # 2. Check base64 credentials in env
+        # 2. Check base64 credentials in env (Railway / Production deployment)
         creds_b64 = (os.getenv("TIDAL_CREDENTIALS_BASE64") or "").strip()
         if creds_b64:
             try:
@@ -51,16 +50,17 @@ class TidalAuth:
             except Exception as e:
                 logger.warning(f"Failed decoding TIDAL_CREDENTIALS_BASE64: {e}")
 
-        # 3. Check JSON token file
-        token_path = TidalConfig.TOKEN_FILE
-        if token_path.exists():
-            try:
-                data = json.loads(token_path.read_text(encoding="utf-8"))
-                self._apply_token_dict(data)
-                logger.info(f"Loaded Tidal credentials from {token_path}.")
-                return True
-            except Exception as e:
-                logger.warning(f"Failed loading {token_path}: {e}")
+        # 3. Check direct environment variables
+        env_access = os.getenv("TIDAL_ACCESS_TOKEN")
+        env_refresh = os.getenv("TIDAL_REFRESH_TOKEN")
+        if env_access:
+            self.user_access_token = env_access.strip()
+            self.user_refresh_token = env_refresh.strip() if env_refresh else None
+            self.user_id = os.getenv("TIDAL_USER_ID", "user")
+            self.user_country_code = os.getenv("TIDAL_COUNTRY_CODE", TidalConfig.DEFAULT_COUNTRY_CODE)
+            self.user_token_expiry = time.time() + 86400 * 30  # Default 30 days
+            logger.info("Loaded Tidal credentials from environment variables.")
+            return True
 
         logger.info("No saved Tidal user credentials found. Using Client Credentials mode.")
         return False
