@@ -867,8 +867,10 @@ async def download_endpoint(
                 artist = getattr(meta, "name", None)
                 track_count = len(getattr(meta, "album_asins", []))
 
-            # Set output directory to "downloads"
-            output_dir = Path("downloads").resolve()
+            # Set isolated unique output directory for this download request
+            import uuid
+            job_id = uuid.uuid4().hex[:12]
+            output_dir = (Path("downloads") / f"amz_{job_id}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
 
             quality_target = (req.quality or "UHD").upper()

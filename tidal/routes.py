@@ -165,12 +165,13 @@ async def download_endpoint(
 ):
     """
     Download and tag Tidal track with strict concurrency control.
-    Streams audio/flac or audio/mp4 directly to browser with Content-Disposition.
     """
     await verify_turnstile_download(x_turnstile_token, request)
     async with DOWNLOAD_SEMAPHORE:
         try:
-            output_dir = Path("downloads/tidal").resolve()
+            import uuid
+            job_id = uuid.uuid4().hex[:12]
+            output_dir = (Path("downloads/tidal") / f"job_{job_id}").resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
 
             file_path = await downloader.download_track(
