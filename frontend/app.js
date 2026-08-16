@@ -640,30 +640,30 @@ async function searchSpotify(query, signal) {
 }
 
 async function searchPreviews(query, signal) {
-    const endpoints = [
-        `${PREVIEW_API}/search/songs?query=${encodeURIComponent(query)}&limit=15`,
-        `https://saavn.me/api/search/songs?query=${encodeURIComponent(query)}&limit=15`
-    ];
-    for (const ep of endpoints) {
-        try {
-            const data = await requestJson(ep, { signal });
-            const list = Array.isArray(data?.data?.results) ? data.data.results : (Array.isArray(data?.data) ? data.data : []);
-            if (list && list.length > 0) {
-                return list;
-            }
-        } catch (e) {
-            // try next fallback preview endpoint
-        }
+    if (!query || !query.trim()) return [];
+    try {
+        const data = await requestJson(`${PREVIEW_API}/search/songs?query=${encodeURIComponent(query.trim())}&limit=40`, { signal });
+        return data?.success && Array.isArray(data?.data?.results) ? data.data.results : [];
+    } catch (e) {
+        console.warn("Preview search notice:", e);
+        return [];
     }
-    return [];
 }
 
 async function findCatalogPreviewCandidates(catalogItems, spotifyItems, initialCandidates, signal) {
-    const unmatchedQueries = catalogItems
-        .filter((item) => !findCatalogPreview(item, spotifyItems, initialCandidates))
-        .map((item) => [item.title, item.artist].filter(Boolean).join(" ").trim())
-        .filter(Boolean);
-    const uniqueQueries = [...new Map(unmatchedQueries.map((query) => [normalize(query), query])).values()].slice(0, 16);
+    const searchQueries = new Set();
+
+    catalogItems.forEach((item) => {
+        const cleanT = cleanTitle(item.title);
+        const tokens = cleanArtistTokens(item.artist);
+        const primaryArtist = tokens[0] || "";
+
+        if (cleanT) searchQueries.add(cleanT);
+        if (cleanT && primaryArtist) searchQueries.add(`${cleanT} ${primaryArtist}`);
+        if (primaryArtist && primaryArtist.length > 2) searchQueries.add(primaryArtist);
+    });
+
+    const uniqueQueries = [...searchQueries].slice(0, 20);
     if (!uniqueQueries.length) return initialCandidates;
 
     const searches = await Promise.allSettled(uniqueQueries.map((query) => searchPreviews(query, signal)));
@@ -671,7 +671,9 @@ async function findCatalogPreviewCandidates(catalogItems, spotifyItems, initialC
 
     const candidates = [...initialCandidates];
     searches.forEach((result) => {
-        if (result.status === "fulfilled") candidates.push(...result.value);
+        if (result.status === "fulfilled" && Array.isArray(result.value)) {
+            candidates.push(...result.value);
+        }
     });
 
     return [...new Map(candidates.map((item) => [item.id || getPreviewUrl(item) || item.url, item])).values()];
@@ -847,9 +849,9 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
     };
     const playableCandidates = previewItems.filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(base.title, candidate.name));
     return bestMatch(base, playableCandidates, previewArtists, {
-        minScore: 15,
-        requireArtist: !normalize(artist).includes("unknown"),
-        durationTolerance: 15,
+        minScore: 11,
+        requireArtist: false,
+        durationTolerance: 30,
     });
 }
 
