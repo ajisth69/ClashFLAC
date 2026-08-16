@@ -121,14 +121,21 @@ def remux_flac(src_mp4, dst):
         metadata = _normalize_metadata(buf[dfla[1] + 4 : dfla[2]])
         written = 0
         mv = memoryview(buf)
-        with open(dst, "wb", buffering=1024 * 1024) as out:
-            out.write(_FLAC_MAGIC)
-            out.write(metadata)
-            for pos, size, _dur in _iter_samples(buf, end):
-                out.write(mv[pos : pos + size])
-                written += 1
-        if written == 0:
-            raise RemuxError("no audio samples found")
+        try:
+            with open(dst, "wb", buffering=1024 * 1024) as out:
+                out.write(_FLAC_MAGIC)
+                out.write(metadata)
+                for pos, size, _dur in _iter_samples(buf, end):
+                    out.write(mv[pos : pos + size])
+                    written += 1
+            if written == 0:
+                raise RemuxError("no audio samples found")
+        finally:
+            try:
+                mv.release()
+            except Exception:
+                pass
+            del mv
     return dst
 
 
@@ -232,13 +239,20 @@ def remux_opus(src_mp4, dst):
             raise RemuxError("no dOps box found (track is not Opus)")
         head, preskip = _opus_head(buf[dops[1] : dops[2]])
         mv = memoryview(buf)
-        samples = [
-            (bytes(mv[pos : pos + size]), dur) for pos, size, dur in _iter_samples(buf, end)
-        ]
-        if not samples:
-            raise RemuxError("no audio samples found")
-        with open(dst, "wb", buffering=1024 * 1024) as out:
-            _write_ogg_opus(out, head, preskip, samples)
+        try:
+            samples = [
+                (bytes(mv[pos : pos + size]), dur) for pos, size, dur in _iter_samples(buf, end)
+            ]
+            if not samples:
+                raise RemuxError("no audio samples found")
+            with open(dst, "wb", buffering=1024 * 1024) as out:
+                _write_ogg_opus(out, head, preskip, samples)
+        finally:
+            try:
+                mv.release()
+            except Exception:
+                pass
+            del mv
     return dst
 
 

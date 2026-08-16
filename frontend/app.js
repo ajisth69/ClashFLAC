@@ -1,15 +1,18 @@
-const DEFAULT_API_BASE = "https://clashflac-production.up.railway.app";
+const isLocalDev = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+const DEFAULT_API_BASE = isLocalDev ? (window.location.port === "5173" ? "" : "http://127.0.0.1:8000") : "https://clashflac-production.up.railway.app";
 const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 
 const savedApi = localStorage.getItem("clash-api-base");
-const activeApi = (!savedApi || savedApi === "https://clashflac.up.railway.app") ? DEFAULT_API_BASE : savedApi;
-if (savedApi === "https://clashflac.up.railway.app") {
-    localStorage.setItem("clash-api-base", DEFAULT_API_BASE);
-}
+const activeApi = isLocalDev
+  ? DEFAULT_API_BASE
+  : ((!savedApi || savedApi === "https://clashflac.up.railway.app" || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
 
 const state = {
     apiBase: activeApi,
     quality: localStorage.getItem("clash-quality") || "UHD",
+    enginePriority: localStorage.getItem("clash-engine-priority") || "amazon",
+    embedArt: localStorage.getItem("clash-embed-art") !== "false",
+    embedLyrics: localStorage.getItem("clash-embed-lyrics") !== "false",
     theme: localStorage.getItem("clash-theme") || "light",
     results: [],
     filteredResults: [],
@@ -99,6 +102,7 @@ function fileSafe(value) {
 }
 
 function api(path) {
+    if (!state.apiBase) return path;
     return `${state.apiBase.replace(/\/$/, "")}${path}`;
 }
 
@@ -113,7 +117,19 @@ function upgradeThumbnail(url) {
     if (!url) return "";
     let clean = safeUrl(url);
     if (!clean) return "";
-    return clean.replace(/\._[A-Z0-9_,]+_\./i, "._SL500_.");
+    if (clean.includes("._S")) {
+        clean = clean.replace(/\._[A-Z0-9_,]+_\./i, "._SL1400_.");
+    }
+    if (clean.includes("mzstatic.com")) {
+        clean = clean.replace(/\/\d+x\d+bb\./i, "/1400x1400bb.");
+    }
+    if (clean.includes("resources.tidal.com")) {
+        clean = clean.replace(/\/\d+x\d+\.jpg$/i, "/1280x1280.jpg");
+    }
+    if (clean.includes("saavncdn.com")) {
+        clean = clean.replace(/\d+x\d+/, "500x500");
+    }
+    return clean;
 }
 
 function getImage(item, preferred = "500x500") {
@@ -145,6 +161,10 @@ function initTurnstile() {
             sitekey: getActiveSiteKey(),
             callback: (token) => {
                 state.turnstileToken = token;
+                if (state.turnstileResolver) {
+                    state.turnstileResolver(token);
+                    state.turnstileResolver = null;
+                }
             },
             "expired-callback": () => {
                 state.turnstileToken = "";
@@ -154,9 +174,12 @@ function initTurnstile() {
             },
             "error-callback": () => {
                 state.turnstileToken = "";
+                if (state.turnstileResolver) {
+                    state.turnstileResolver("");
+                    state.turnstileResolver = null;
+                }
             },
-            size: "flexible",
-            theme: state.theme === "dark" ? "dark" : "light"
+            size: "invisible",
         });
     } catch (err) {
         console.warn("Turnstile init notice:", err);
@@ -169,8 +192,34 @@ window.onTurnstileLoaded = () => {
 };
 
 async function getTurnstileToken() {
-    // Turnstile bypassed temporarily per Origin Lock mode
-    return state.turnstileToken || "";
+    if (state.turnstileToken) {
+        const t = state.turnstileToken;
+        return t;
+    }
+    if (!window.turnstile) return "";
+
+    initTurnstile();
+
+    return new Promise((resolve) => {
+        state.turnstileResolver = resolve;
+        try {
+            if (state.turnstileWidgetId !== null) {
+                window.turnstile.execute(state.turnstileWidgetId);
+            } else {
+                const container = document.getElementById("cf-turnstile-container");
+                if (container) window.turnstile.execute(container);
+            }
+        } catch (e) {
+            console.warn("Turnstile execute:", e);
+        }
+        // Instant fallback resolve after 1.2s so downloads never lag or fail
+        setTimeout(() => {
+            if (state.turnstileResolver) {
+                state.turnstileResolver(state.turnstileToken || "");
+                state.turnstileResolver = null;
+            }
+        }, 1200);
+    });
 }
 
 function resetTurnstile() {
@@ -180,50 +229,11 @@ function resetTurnstile() {
         } catch {}
     }
     state.turnstileToken = "";
-}
-
-async function generateBrowserHandshake(method, url) {
-    const timestamp = Date.now().toString();
-    const nonce = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
-        ? crypto.randomUUID()
-        : (Math.random().toString(36).substring(2) + Date.now().toString(36));
-
-    let path = url;
-    try {
-        const parsed = new URL(url, window.location.origin);
-        path = parsed.pathname;
-    } catch {}
-
-    const salt = "cf-clash-flac-v2-secure-handshake";
-    const raw = `${method.toUpperCase()}:${path}:${timestamp}:${nonce}:${salt}`;
-
-    let signature = "";
-    try {
-        const msgBuffer = new TextEncoder().encode(raw);
-        const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
-        signature = Array.from(new Uint8Array(hashBuffer))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
-    } catch {
-        signature = "";
-    }
-
-    return {
-        "X-Clash-Sign": signature,
-        "X-Clash-Time": timestamp,
-        "X-Clash-Nonce": nonce,
-    };
+    state.turnstileResolver = null;
 }
 
 async function requestJson(url, options = {}) {
-    const method = (options.method || "GET").toUpperCase();
-    const handshake = await generateBrowserHandshake(method, url);
     const headers = options.headers ? new Headers(options.headers) : new Headers();
-    Object.entries(handshake).forEach(([k, v]) => headers.set(k, v));
-    const token = await getTurnstileToken();
-    if (token) {
-        headers.set("X-Turnstile-Token", token);
-    }
     const response = await fetch(url, { ...options, headers });
     if (!response.ok) {
         let detail = `Request failed (${response.status})`;
@@ -414,6 +424,15 @@ function bindEvents() {
         });
     });
 
+    document.querySelectorAll(".engine-card").forEach((card) => {
+        card.addEventListener("click", () => {
+            const val = card.dataset.engine;
+            const input = document.getElementById("engine-setting");
+            if (input) input.value = val;
+            document.querySelectorAll(".engine-card").forEach((c) => c.classList.toggle("active", c === card));
+        });
+    });
+
     const toggleSidePanel = document.getElementById("toggle-side-panel");
     const closeSidePanel = document.getElementById("close-side-panel");
     const sidePanel = document.getElementById("side-panel");
@@ -468,8 +487,8 @@ function setSearchMode(mode) {
     state.searchMode = mode === "link" ? "link" : "music";
     document.querySelectorAll("[data-search-mode]").forEach((button) => button.classList.toggle("active", button.dataset.searchMode === state.searchMode));
     if (state.searchMode === "link") {
-        dom.searchInput.placeholder = "Paste a Spotify, YouTube, or Amazon Music link";
-        if (dom.searchModeHint) dom.searchModeHint.textContent = "Spotify • YouTube • Amazon Music links supported";
+        dom.searchInput.placeholder = "Paste an Amazon, Tidal, Spotify, or YouTube link";
+        if (dom.searchModeHint) dom.searchModeHint.textContent = "Amazon Music • Tidal • Spotify • YouTube links supported";
         if (dom.metadataFilters) dom.metadataFilters.hidden = true;
         dom.toggleFilters?.setAttribute("aria-expanded", "false");
     } else {
@@ -500,10 +519,16 @@ async function handleSearch(event) {
         dom.searchInput.focus();
         return;
     }
-    if (state.searchMode === "link" && !/^https?:\/\//i.test(primaryQuery)) {
-        showToast("That is not a link", "Paste a full Spotify, YouTube, or Amazon Music URL.", "error");
+    if (state.searchMode === "link" && !/^https?:\/\//i.test(primaryQuery) && !primaryQuery.startsWith("tidal:") && !primaryQuery.startsWith("spotify:")) {
+        showToast("That is not a link", "Paste a full Amazon Music, Tidal, Spotify, or YouTube URL.", "error");
         dom.searchInput.focus();
         return;
+    }
+
+    // Automatically navigate to Discover view if user searched from Downloads, Queue, etc.
+    setActiveNav("discover", false);
+    if (window.location.hash !== "#discover") {
+        history.replaceState(null, "", "#discover");
     }
 
     state.searchController?.abort();
@@ -512,35 +537,50 @@ async function handleSearch(event) {
 
     try {
         let resolvedQuery = primaryQuery;
-        let directTrack = null;
-        if (/^https?:\/\//i.test(primaryQuery)) {
+        let directAmazonTrack = null;
+        let directTidalTrack = null;
+        if (/^https?:\/\//i.test(primaryQuery) || primaryQuery.startsWith("tidal:") || primaryQuery.startsWith("spotify:")) {
             const resolved = await resolveLink(primaryQuery, state.searchController.signal);
             resolvedQuery = resolved.query;
-            directTrack = resolved.track;
-            if (directTrack) directTrack.inputUrl = primaryQuery;
-            if (state.searchMode !== "link" && resolvedQuery && resolvedQuery !== primaryQuery) dom.searchInput.value = resolvedQuery;
+            if (resolved.directSource === "amazon" && resolved.track) {
+                directAmazonTrack = resolved.track;
+                directAmazonTrack.inputUrl = primaryQuery;
+            } else if (resolved.directSource === "tidal" && resolved.track) {
+                directTidalTrack = resolved.track;
+                directTidalTrack.inputUrl = primaryQuery;
+            }
+            if (state.searchMode !== "link" && resolvedQuery && resolvedQuery !== primaryQuery) {
+                dom.searchInput.value = resolvedQuery;
+            }
         }
 
         const catalogQuery = [resolvedQuery, artist, album, year].filter(Boolean).join(" ").trim();
-        const [amazonResult, spotifyResult, previewResult] = await Promise.allSettled([
-            directTrack ? Promise.resolve([directTrack]) : searchAmazon(catalogQuery, state.searchController.signal),
+        const [amazonResult, tidalResult, spotifyResult, previewResult] = await Promise.allSettled([
+            directAmazonTrack ? Promise.resolve([directAmazonTrack]) : (directTidalTrack ? Promise.resolve([]) : searchAmazon(catalogQuery, state.searchController.signal)),
+            directTidalTrack ? Promise.resolve([directTidalTrack]) : (directAmazonTrack ? Promise.resolve([]) : searchTidal(catalogQuery, state.searchController.signal)),
             searchSpotify(catalogQuery, state.searchController.signal),
             searchPreviews(catalogQuery, state.searchController.signal),
         ]);
 
         if (state.searchController.signal.aborted) return;
-        const amazon = amazonResult.status === "fulfilled" ? amazonResult.value : [];
-        const spotify = spotifyResult.status === "fulfilled" ? spotifyResult.value : [];
-        const initialPreviews = previewResult.status === "fulfilled" ? previewResult.value : [];
-        const previews = amazon.length
-            ? await findCatalogPreviewCandidates(amazon, spotify, initialPreviews, state.searchController.signal)
+        const amazon = amazonResult.status === "fulfilled" && Array.isArray(amazonResult.value) ? amazonResult.value : [];
+        const tidal = tidalResult.status === "fulfilled" && Array.isArray(tidalResult.value) ? tidalResult.value : [];
+        const spotify = spotifyResult.status === "fulfilled" && Array.isArray(spotifyResult.value) ? spotifyResult.value : [];
+        const initialPreviews = previewResult.status === "fulfilled" && Array.isArray(previewResult.value) ? previewResult.value : [];
+        
+        const allCatalogItems = [...amazon, ...tidal];
+        const previews = allCatalogItems.length
+            ? await findCatalogPreviewCandidates(allCatalogItems, spotify, initialPreviews, state.searchController.signal)
             : [];
         if (state.searchController.signal.aborted) return;
-        state.results = mergeSearchSources(amazon, spotify, previews);
+        state.results = mergeSearchSources(amazon, tidal, spotify, previews);
 
         if (!state.results.length) {
-            const reasons = [amazonResult, previewResult].filter((result) => result.status === "rejected").map((result) => result.reason?.message).filter(Boolean);
-            renderSearchError(reasons[0] || "No tracks matched those details.", false);
+            const reasons = [amazonResult, tidalResult, previewResult]
+                .filter((result) => result.status === "rejected")
+                .map((result) => result.reason?.message)
+                .filter(Boolean);
+            renderSearchError(reasons[0] || "No tracks matched those details across Amazon & Tidal.", false);
             return;
         }
 
@@ -554,6 +594,7 @@ async function handleSearch(event) {
 }
 
 async function resolveLink(value, signal) {
+    // 1. Amazon Music URL
     if (/music\.amazon\./i.test(value) || /amazon\.[^/]+\/music/i.test(value)) {
         const asinMatch = value.match(/(?:trackAsin=|tracks\/|albums\/)([A-Z0-9]{10})/i);
         if (asinMatch) {
@@ -563,16 +604,35 @@ async function resolveLink(value, signal) {
                 body: JSON.stringify({ input: asinMatch[1], quality: state.quality }),
                 signal,
             });
-            return { query: `${track.title} ${track.artist}`, track };
+            return { query: `${track.title} ${track.artist}`, track, directSource: "amazon" };
         }
     }
 
+    // 2. Tidal URL or URI
+    if (/tidal\.com\//i.test(value) || value.startsWith("tidal:")) {
+        const trackIdMatch = value.match(/(?:track\/|trackId=|tidal:track:)(\d+)/i);
+        if (trackIdMatch) {
+            const track = await requestJson(api("/api/tidal/resolve"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ input: trackIdMatch[1], quality: state.quality }),
+                signal,
+            });
+            return { query: `${track.title} ${track.artist}`, track, directSource: "tidal" };
+        }
+    }
+
+    // 3. Fallback resolve endpoint
     const data = await requestJson(api(`/api/resolve?q=${encodeURIComponent(value)}`), { signal });
-    return { query: data.resolved || value, track: null };
+    return { query: data.resolved || value, track: null, directSource: null };
 }
 
 async function searchAmazon(query, signal) {
     return requestJson(api(`/api/search?q=${encodeURIComponent(query)}&limit=20`), { signal });
+}
+
+async function searchTidal(query, signal) {
+    return requestJson(api(`/api/tidal/search?q=${encodeURIComponent(query)}&limit=20`), { signal });
 }
 
 async function searchSpotify(query, signal) {
@@ -580,16 +640,21 @@ async function searchSpotify(query, signal) {
 }
 
 async function searchPreviews(query, signal) {
-    const data = await requestJson(`${PREVIEW_API}/search/songs?query=${encodeURIComponent(query)}`, { signal });
-    return data?.success && Array.isArray(data?.data?.results) ? data.data.results : [];
+    try {
+        const data = await requestJson(`${PREVIEW_API}/search/songs?query=${encodeURIComponent(query)}`, { signal });
+        return data?.success && Array.isArray(data?.data?.results) ? data.data.results : [];
+    } catch (e) {
+        console.warn("Preview search notice:", e);
+        return [];
+    }
 }
 
-async function findCatalogPreviewCandidates(amazonItems, spotifyItems, initialCandidates, signal) {
-    const unmatchedQueries = amazonItems
+async function findCatalogPreviewCandidates(catalogItems, spotifyItems, initialCandidates, signal) {
+    const unmatchedQueries = catalogItems
         .filter((item) => !findCatalogPreview(item, spotifyItems, initialCandidates))
         .map((item) => [item.title, item.artist].filter(Boolean).join(" ").trim())
         .filter(Boolean);
-    const uniqueQueries = [...new Map(unmatchedQueries.map((query) => [normalize(query), query])).values()].slice(0, 12);
+    const uniqueQueries = [...new Map(unmatchedQueries.map((query) => [normalize(query), query])).values()].slice(0, 16);
     if (!uniqueQueries.length) return initialCandidates;
 
     const searches = await Promise.allSettled(uniqueQueries.map((query) => searchPreviews(query, signal)));
@@ -601,6 +666,33 @@ async function findCatalogPreviewCandidates(amazonItems, spotifyItems, initialCa
     });
 
     return [...new Map(candidates.map((item) => [item.id || getPreviewUrl(item) || item.url, item])).values()];
+}
+
+function cleanTitle(title) {
+    if (!title) return "";
+    return String(title)
+        .replace(/\((?:official\s+)?(?:music\s+)?video\)/gi, "")
+        .replace(/\[(?:official\s+)?(?:music\s+)?video\]/gi, "")
+        .replace(/\((?:official\s+)?audio\)/gi, "")
+        .replace(/\[(?:official\s+)?audio\]/gi, "")
+        .replace(/\(lyric(?:s)?(?:\s+video)?\)/gi, "")
+        .replace(/\[lyric(?:s)?(?:\s+video)?\]/gi, "")
+        .replace(/\[(?:hd|hq|4k|1080p)\]/gi, "")
+        .replace(/\((?:visualizer|clip\s+officiel)\)/gi, "")
+        .replace(/\((?:explicit|clean)\)/gi, "")
+        .replace(/\s*(?:feat\.|ft\.|featuring|with)\s+[^\(\)\[\]]+/gi, "")
+        .replace(/[\(\[\{]\s*(?:feat\.|ft\.|featuring|with)[^\)\]\}]+[\)\]\}]/gi, "")
+        .trim();
+}
+
+function cleanArtistTokens(artistStr) {
+    if (!artistStr) return [];
+    const norm = normalize(artistStr);
+    if (!norm || norm.includes("unknown")) return [];
+    return norm
+        .split(/(?:,|\s+(?:feat\.|ft\.|featuring|with|and|&|x|\/|\+)\s+)/i)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 1 && !["the", "and", "feat", "ft", "various"].includes(s));
 }
 
 function tokenSimilarity(left, right) {
@@ -615,30 +707,56 @@ function artistsCompatible(left, right) {
     const a = normalize(left);
     const b = normalize(right);
     if (!a || !b || a.includes("unknown") || b.includes("unknown")) return false;
-    return a.includes(b) || b.includes(a) || tokenSimilarity(a, b) >= 0.5;
+    if (a === b || a.includes(b) || b.includes(a)) return true;
+    const tokensA = cleanArtistTokens(left);
+    const tokensB = cleanArtistTokens(right);
+    if (!tokensA.length || !tokensB.length) return false;
+    const overlap = tokensA.some((token) => tokensB.some((bToken) => bToken.includes(token) || token.includes(bToken)));
+    return overlap || tokenSimilarity(a, b) >= 0.45;
 }
 
 function matchScore(base, candidate, candidateArtist = "") {
-    const titleA = normalize(base.title);
-    const titleB = normalize(candidate.title || candidate.name);
-    const titleSimilarity = tokenSimilarity(titleA, titleB);
-    const artistA = normalize(base.artist);
-    const artistB = normalize(candidate.artist || candidateArtist);
+    const baseRaw = normalize(base.title);
+    const candRaw = normalize(candidate.title || candidate.name);
+    const baseClean = normalize(cleanTitle(base.title));
+    const candClean = normalize(cleanTitle(candidate.title || candidate.name));
+    
     let score = 0;
-    if (titleA === titleB) score += 12;
-    else if ((titleA.includes(titleB) || titleB.includes(titleA)) && Math.min(titleA.length, titleB.length) >= 6) score += 9;
-    else if (titleSimilarity >= 0.75) score += 8;
-    else if (titleSimilarity >= 0.5) score += 5;
-    if (artistsCompatible(artistA, artistB)) score += 7;
-    if (base.album && candidate.album && tokenSimilarity(base.album, candidate.album?.name || candidate.album) >= 0.6) score += 2;
+    if (baseRaw === candRaw || baseClean === candClean) {
+        score += 15;
+    } else {
+        const simClean = tokenSimilarity(baseClean, candClean);
+        const simRaw = tokenSimilarity(baseRaw, candRaw);
+        const maxSim = Math.max(simClean, simRaw);
+        if (maxSim >= 0.85) score += 12;
+        else if (maxSim >= 0.70) score += 9;
+        else if (maxSim >= 0.50) score += 6;
+        else if ((baseClean.includes(candClean) || candClean.includes(baseClean)) && Math.min(baseClean.length, candClean.length) >= 5) score += 7;
+    }
+
+    const artistA = base.artist;
+    const artistB = candidate.artist || candidateArtist;
+    if (artistsCompatible(artistA, artistB)) {
+        score += 8;
+        if (normalize(artistA) === normalize(artistB)) score += 3;
+    }
+
+    if (base.album && candidate.album) {
+        const albumA = normalize(base.album);
+        const albumB = normalize(candidate.album?.name || candidate.album);
+        if (albumA === albumB) score += 4;
+        else if (tokenSimilarity(albumA, albumB) >= 0.6) score += 2;
+    }
+
     const candidateDuration = Number(candidate.duration || candidate.duration_sec || 0);
     const baseDuration = Number(base.duration || base.duration_sec || 0);
     if (candidateDuration && baseDuration) {
         const difference = Math.abs(candidateDuration - baseDuration);
-        if (difference <= 3) score += 3;
-        else if (difference <= 10) score += 1;
-        else if (difference > 20) score -= 5;
+        if (difference <= 3) score += 4;
+        else if (difference <= 8) score += 2;
+        else if (difference > 25) score -= 6;
     }
+
     return score;
 }
 
@@ -692,55 +810,166 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
     };
     const playableCandidates = previewItems.filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(base.title, candidate.name));
     return bestMatch(base, playableCandidates, previewArtists, {
-        minScore: 14,
+        minScore: 13,
         requireArtist: !normalize(artist).includes("unknown"),
-        durationTolerance: 18,
+        durationTolerance: 20,
     });
 }
 
-function mergeSearchSources(amazonItems, spotifyItems, previewItems) {
-    return amazonItems.map((item, index) => {
-        const rawArtist = item.artist && !normalize(item.artist).includes("unknown") ? item.artist : "";
-        const spotify = bestMatch({ title: item.title, artist: rawArtist, album: item.album || "", duration: Number(item.duration_sec || 0) }, spotifyItems, (entry) => entry.artist || "", { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) });
-        const artist = rawArtist || spotify?.artist || "Unknown artist";
-        const preview = findCatalogPreview(item, spotifyItems, previewItems);
-        return {
-            id: `amazon-${item.asin || index}`,
-            asin: item.asin || "",
-            title: item.title || spotify?.title || preview?.name || "Unknown title",
-            artist: artist || previewArtists(preview),
-            album: item.album || spotify?.album || preview?.album?.name || "",
-            year: item.year || spotify?.year || preview?.year || "",
-            releaseDate: item.release_date || spotify?.release_date || "",
-            duration: Number(item.duration_sec || preview?.duration || 0),
-            image: spotify?.thumbnail_hq || getImage(preview, "500x500") || (item.thumbnail_url ? upgradeThumbnail(item.thumbnail_url) : "") || spotify?.thumbnail_url || getImage(preview),
-            amazonUrl: safeUrl(item.url || item.inputUrl || ""),
+function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems) {
+    const matchedTidalAsins = new Set();
+    const matchedAmazonAsins = new Set();
+    const results = [];
+
+    // 1. Process Amazon items as base, matching corresponding Tidal and Spotify items
+    amazonItems.forEach((amzItem, amzIdx) => {
+        const rawArtist = amzItem.artist && !normalize(amzItem.artist).includes("unknown") ? amzItem.artist : "";
+
+        // Find matching Spotify metadata
+        const spotify = bestMatch(
+            { title: amzItem.title, artist: rawArtist, album: amzItem.album || "", duration: Number(amzItem.duration_sec || 0) },
+            spotifyItems,
+            (entry) => entry.artist || "",
+            { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) }
+        );
+
+        // Find matching Tidal track
+        const matchedTidal = bestMatch(
+            { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
+            tidalItems.filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (entry) => entry.artist || "",
+            { minScore: 11, requireArtist: Boolean(rawArtist) }
+        );
+
+        if (matchedTidal) {
+            matchedTidalAsins.add(String(matchedTidal.asin));
+        }
+        matchedAmazonAsins.add(String(amzItem.asin));
+
+        // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
+        const preview = findCatalogPreview(amzItem, spotifyItems, previewItems);
+        const jioUrl = getPreviewUrl(preview);
+        const spotify30s = spotify?.preview_url;
+        const streamUrl = jioUrl || spotify30s || "";
+        const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
+
+        const artist = spotify?.artist || rawArtist || previewArtists(preview);
+        const title = spotify?.title || amzItem.title || "Unknown title";
+        const album = spotify?.album || amzItem.album || preview?.album?.name || "";
+
+        results.push({
+            id: `song-${amzItem.asin || amzIdx}`,
+            asin: amzItem.asin || "",
+            amazonAsin: amzItem.asin || "",
+            tidalAsin: matchedTidal?.asin || "",
+            title: title,
+            artist: artist,
+            album: album,
+            year: spotify?.year || amzItem.year || matchedTidal?.year || preview?.year || "",
+            releaseDate: spotify?.release_date || amzItem.release_date || matchedTidal?.release_date || "",
+            duration: Number(spotify?.duration_sec || amzItem.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
+            image: spotify?.thumbnail_hq || (matchedTidal?.thumbnail_url) || (amzItem.thumbnail_url ? upgradeThumbnail(amzItem.thumbnail_url) : "") || getImage(preview, "500x500") || spotify?.thumbnail_url || getImage(preview),
+            amazonUrl: safeUrl(amzItem.url || amzItem.inputUrl || ""),
+            tidalUrl: matchedTidal ? safeUrl(matchedTidal.url || `https://tidal.com/browse/track/${matchedTidal.asin}`) : "",
             spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
             previewPageUrl: safeUrl(preview?.url || ""),
-            streamUrl: getPreviewUrl(preview),
+            streamUrl: streamUrl,
+            streamType: streamType,
             previewId: preview?.id || "",
             spotifyId: spotify?.spotify_id || "",
-            codec: item.codec || "flac",
-            bitrate: item.bitrate || 0,
+            codec: "flac",
+            bitrate: amzItem.bitrate || 0,
             language: preview?.language || "",
             label: preview?.label || "",
             copyright: preview?.copyright || "",
             playCount: preview?.playCount || "",
-            genre: item.genre || "",
-            trackNumber: item.track_number || "",
-            discNumber: item.disc_number || "",
-            explicit: Boolean(item.explicit || preview?.explicitContent),
-            source: "amazon",
-            downloadSource: "amazon",
-            downloadInput: item.asin || item.url || item.title,
-            relevance: index,
-        };
+            genre: amzItem.genre || matchedTidal?.genre || "",
+            trackNumber: amzItem.track_number || matchedTidal?.track_number || "",
+            discNumber: amzItem.disc_number || matchedTidal?.disc_number || "",
+            explicit: Boolean(amzItem.explicit || matchedTidal?.explicit || preview?.explicitContent),
+            source: "spotify_unified",
+            downloadSource: (matchedTidal && state.enginePriority === "tidal") ? "tidal" : "amazon",
+            downloadInput: (matchedTidal && state.enginePriority === "tidal") ? (matchedTidal.asin || matchedTidal.url) : (amzItem.asin || amzItem.url || amzItem.title),
+            hasAmazon: true,
+            hasTidal: Boolean(matchedTidal),
+            hasBothSources: Boolean(matchedTidal),
+            audioQuality: state.quality || "UHD",
+            relevance: amzIdx,
+        });
     });
+
+    // 2. Process Tidal-only items (Tracks present in Tidal only)
+    tidalItems.forEach((tItem, tIdx) => {
+        if (matchedTidalAsins.has(String(tItem.asin))) return;
+
+        const rawArtist = tItem.artist && !normalize(tItem.artist).includes("unknown") ? tItem.artist : "";
+
+        // Find matching Spotify metadata
+        const spotify = bestMatch(
+            { title: tItem.title, artist: rawArtist, album: tItem.album || "", duration: Number(tItem.duration_sec || 0) },
+            spotifyItems,
+            (entry) => entry.artist || "",
+            { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) }
+        );
+
+        // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
+        const preview = findCatalogPreview(tItem, spotifyItems, previewItems);
+        const jioUrl = getPreviewUrl(preview);
+        const spotify30s = spotify?.preview_url;
+        const streamUrl = jioUrl || spotify30s || "";
+        const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
+
+        const artist = spotify?.artist || rawArtist || previewArtists(preview);
+        const title = spotify?.title || tItem.title || "Unknown title";
+        const album = spotify?.album || tItem.album || preview?.album?.name || "";
+
+        results.push({
+            id: `song-tidal-${tItem.asin || tIdx}`,
+            asin: tItem.asin || "",
+            amazonAsin: "",
+            tidalAsin: tItem.asin || "",
+            title: title,
+            artist: artist,
+            album: album,
+            year: spotify?.year || tItem.year || preview?.year || "",
+            releaseDate: spotify?.release_date || tItem.release_date || "",
+            duration: Number(spotify?.duration_sec || tItem.duration_sec || preview?.duration || 0),
+            image: spotify?.thumbnail_hq || tItem.thumbnail_url || getImage(preview, "500x500") || spotify?.thumbnail_url || getImage(preview),
+            amazonUrl: "",
+            tidalUrl: safeUrl(tItem.url || tItem.inputUrl || `https://tidal.com/browse/track/${tItem.asin}`),
+            spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
+            previewPageUrl: safeUrl(preview?.url || ""),
+            streamUrl: streamUrl,
+            streamType: streamType,
+            previewId: preview?.id || "",
+            spotifyId: spotify?.spotify_id || "",
+            codec: "flac",
+            bitrate: 0,
+            language: preview?.language || "",
+            label: preview?.label || "",
+            copyright: preview?.copyright || "",
+            playCount: preview?.playCount || "",
+            genre: tItem.genre || "",
+            trackNumber: tItem.track_number || "",
+            discNumber: tItem.disc_number || "",
+            explicit: Boolean(tItem.explicit || preview?.explicitContent),
+            source: "spotify_unified",
+            downloadSource: "tidal", // Only Tidal is available for this song
+            downloadInput: tItem.asin || tItem.url || tItem.title,
+            hasAmazon: false,
+            hasTidal: true,
+            hasBothSources: false,
+            audioQuality: tItem.audio_quality || "HI_RES",
+            relevance: amazonItems.length + tIdx,
+        });
+    });
+
+    return results;
 }
 
 function setSearchLoading() {
-    dom.resultsTitle.textContent = "Searching Amazon Music…";
-    dom.resultsSummary.textContent = "Matching catalog metadata with verified playable sources.";
+    dom.resultsTitle.textContent = "Searching catalog & metadata…";
+    dom.resultsSummary.textContent = "Matching Spotify metadata with Amazon & Tidal lossless sources.";
     dom.searchResults.innerHTML = `<div class="loading-list">${Array.from({ length: 6 }, () => '<div class="skeleton-row"></div>').join("")}</div>`;
 }
 
@@ -762,7 +991,7 @@ function applyFilters() {
         if (duration === "medium" && (track.duration < 180 || track.duration > 300)) return false;
         if (duration === "long" && track.duration <= 300) return false;
         if (availability === "playable" && !track.streamUrl) return false;
-        if (availability === "lossless" && track.downloadSource !== "amazon") return false;
+        if (availability === "lossless" && !track.hasAmazon && !track.hasTidal) return false;
         return true;
     });
 
@@ -780,9 +1009,18 @@ function applyFilters() {
 function renderResults() {
     const count = state.filteredResults.length;
     const playableCount = state.filteredResults.filter((track) => track.streamUrl).length;
-    const losslessCount = state.filteredResults.filter((track) => track.downloadSource === "amazon").length;
-    dom.resultsTitle.textContent = count ? `${count} catalog result${count === 1 ? "" : "s"}` : "No matching tracks";
-    dom.resultsSummary.textContent = count ? `${playableCount} playable · ${losslessCount} lossless downloads · Amazon catalog` : "Try broadening the metadata filters.";
+    const bothCount = state.filteredResults.filter((track) => track.hasBothSources).length;
+    const amzOnlyCount = state.filteredResults.filter((track) => track.hasAmazon && !track.hasTidal).length;
+    const tidalOnlyCount = state.filteredResults.filter((track) => track.hasTidal && !track.hasAmazon).length;
+    
+    let summaryParts = [`${playableCount} playable`];
+    if (bothCount) summaryParts.push(`${bothCount} Amazon & Tidal`);
+    if (amzOnlyCount) summaryParts.push(`${amzOnlyCount} Amazon only`);
+    if (tidalOnlyCount) summaryParts.push(`${tidalOnlyCount} Tidal only`);
+    summaryParts.push("Spotify metadata");
+
+    dom.resultsTitle.textContent = count ? `${count} unified track${count === 1 ? "" : "s"}` : "No matching tracks";
+    dom.resultsSummary.textContent = count ? summaryParts.join(" · ") : "Try broadening the metadata filters.";
 
     if (!count) {
         dom.searchResults.innerHTML = `<div class="empty-state"><div class="empty-main"><div class="empty-icon">${icon("filter")}</div><div class="empty-text"><h3>No filtered results</h3><p>Clear or broaden the artist, album, year, or duration criteria.</p></div></div></div>`;
@@ -794,7 +1032,27 @@ function renderResults() {
         const playing = state.currentTrack?.id === track.id ? " now-playing" : "";
         const playable = Boolean(track.streamUrl);
         const unavailable = playable ? "" : " preview-unavailable";
-        const lossless = track.downloadSource === "amazon";
+
+        let sourceBadge = '<span class="badge">Direct audio</span>';
+        if (track.hasBothSources) {
+            sourceBadge = '<span class="badge lossless" title="Available in Ultra HD on Amazon & Tidal">Amazon & Tidal FLAC</span>';
+        } else if (track.hasAmazon) {
+            sourceBadge = '<span class="badge lossless" title="Available in Ultra HD on Amazon Music">Amazon FLAC</span>';
+        } else if (track.hasTidal) {
+            sourceBadge = '<span class="badge lossless tidal-badge" title="Available in Hi-Res on Tidal">Tidal FLAC</span>';
+        }
+
+        let previewBadge = '<span class="badge unavailable">No preview</span>';
+        if (track.streamType === "full") {
+            previewBadge = '<span class="badge preview">Hi-Fi Stream</span>';
+        } else if (track.streamType === "spotify-30s") {
+            previewBadge = '<span class="badge preview">30s Preview</span>';
+        }
+
+        let catalogLabel = track.hasBothSources
+            ? "Spotify metadata · Amazon + Tidal FLAC"
+            : (track.hasAmazon ? "Spotify metadata · Amazon FLAC" : (track.hasTidal ? "Spotify metadata · Tidal FLAC" : "Spotify metadata"));
+
         return `<article class="result-card${selected}${playing}${unavailable}" data-track-id="${escapeHtml(track.id)}" tabindex="0">
             <div class="result-art">
                 ${imageMarkup(track.image, `${track.title} cover`)}
@@ -804,13 +1062,13 @@ function renderResults() {
                 <strong title="${escapeHtml(track.title)}">${escapeHtml(track.title)}</strong>
                 <span>${escapeHtml(track.artist)}</span>
                 <div class="result-badges">
-                    ${lossless ? '<span class="badge lossless">Lossless FLAC</span>' : '<span class="badge">Direct audio</span>'}
-                    ${playable ? '<span class="badge preview">Play verified</span>' : '<span class="badge unavailable">No preview</span>'}
+                    ${sourceBadge}
+                    ${previewBadge}
                     ${track.year ? `<span class="badge">${escapeHtml(track.year)}</span>` : ""}
                     ${track.language ? `<span class="badge">${escapeHtml(track.language)}</span>` : ""}
                 </div>
             </div>
-            <div class="result-album"><strong>${escapeHtml(track.album || "Single / unknown album")}</strong><span>${track.source === "amazon" ? "Amazon catalog" : "Playable preview catalog"}</span></div>
+            <div class="result-album"><strong>${escapeHtml(track.album || "Single / unknown album")}</strong><span>${escapeHtml(catalogLabel)}</span></div>
             <span class="result-duration">${formatDuration(track.duration)}</span>
             <div class="result-actions">
                 ${playable ? `<button class="action-button" type="button" data-action="queue" aria-label="Add to play queue">${icon("plus")}</button>` : ""}
@@ -860,13 +1118,38 @@ function renderInspector() {
     const track = state.selectedTrack;
     if (!dom.inspector || !track) return;
     const playable = Boolean(track.streamUrl);
-    const lossless = track.downloadSource === "amazon";
+
+    let losslessBadge = `<span class="badge">${escapeHtml(track.codec || "AAC")}</span>`;
+    if (track.hasBothSources) {
+        losslessBadge = '<span class="badge lossless">Amazon & Tidal FLAC</span>';
+    } else if (track.hasAmazon) {
+        losslessBadge = '<span class="badge lossless">Amazon 24-bit FLAC</span>';
+    } else if (track.hasTidal) {
+        losslessBadge = '<span class="badge lossless tidal-badge">Tidal Hi-Res FLAC</span>';
+    }
+
+    let sourceFact = "Spotify Metadata";
+    if (track.hasBothSources) sourceFact = "Amazon Music (UHD) + Tidal (HiFi)";
+    else if (track.hasAmazon) sourceFact = "Amazon Music (Ultra HD)";
+    else if (track.hasTidal) sourceFact = "Tidal Music (Hi-Res)";
+
+    let previewFact = "No Browser Preview";
+    if (track.streamType === "full") previewFact = "Hi-Fi Full Audio (320 kbps)";
+    else if (track.streamType === "spotify-30s") previewFact = "Spotify 30-Sec Preview";
+
     const facts = [
+        ["Lossless FLAC", sourceFact],
+        ["Audio Stream", previewFact],
         ["Released", track.releaseDate || track.year],
         ["Duration", formatDuration(track.duration)],
         ["Genre", track.genre],
         ["Track", track.trackNumber ? `${track.trackNumber}${track.discNumber ? ` · Disc ${track.discNumber}` : ""}` : ""],
     ].filter(([, value]) => value && value !== "—" && value !== "Unknown");
+
+    const tidalAltBtn = (track.hasBothSources && track.tidalAsin)
+        ? `<button class="secondary-button" type="button" data-inspector-action="download-tidal" title="Download via Tidal">${icon("download")} Download Tidal FLAC</button>`
+        : "";
+
     dom.inspector.className = "inspector-content";
     dom.inspector.innerHTML = `
         <div class="inspector-identity">
@@ -874,12 +1157,12 @@ function renderInspector() {
             <div class="inspector-title"><h3>${escapeHtml(track.title)}</h3><p>${escapeHtml(track.artist)}</p><span>${escapeHtml(track.album || "Album unavailable")}</span></div>
         </div>
         <div class="result-badges">
-            ${lossless ? '<span class="badge lossless">FLAC available</span>' : `<span class="badge">${escapeHtml(track.codec || "AAC")}</span>`}
-            ${playable ? '<span class="badge preview">Verified preview</span>' : '<span class="badge unavailable">Download only</span>'}
+            ${losslessBadge}
+            ${playable ? `<span class="badge preview">${track.streamType === "full" ? "Hi-Fi Stream" : "30s Preview"}</span>` : '<span class="badge unavailable">Download only</span>'}
             ${track.explicit ? '<span class="badge unavailable">Explicit</span>' : ""}
         </div>
         ${facts.length ? `<div class="track-facts">${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join("")}</div>` : ""}
-        ${playable ? `<div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="play">${icon("play")} Play preview</button><button class="secondary-button" type="button" data-inspector-action="download" aria-label="Download">${icon("download")}</button></div>` : `<div class="no-preview-note">${icon("alert")} No verified browser preview. Playback and queue controls are hidden.</div><div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="download">${icon("download")} Download track</button></div>`}`;
+        ${playable ? `<div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="play">${icon("play")} Play preview</button><button class="secondary-button" type="button" data-inspector-action="download" aria-label="Download">${icon("download")} Download FLAC</button>${tidalAltBtn}</div>` : `<div class="no-preview-note">${icon("alert")} No verified browser preview. Playback and queue controls are hidden.</div><div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="download">${icon("download")} Download FLAC</button>${tidalAltBtn}</div>`}`;
     dom.inspector.querySelector("img")?.addEventListener("error", (event) => event.target.remove(), { once: true });
 }
 
@@ -888,6 +1171,14 @@ function handleInspectorAction(event) {
     if (!action || !state.selectedTrack) return;
     if (action === "play" && state.selectedTrack.streamUrl) playTrack(state.selectedTrack, { setContext: true });
     if (action === "download") startDownload(state.selectedTrack);
+    if (action === "download-tidal") {
+        const tidalTrackCopy = {
+            ...state.selectedTrack,
+            downloadSource: "tidal",
+            downloadInput: state.selectedTrack.tidalAsin || state.selectedTrack.downloadInput
+        };
+        startDownload(tidalTrackCopy);
+    }
 }
 
 async function resolvePreview(track) {
@@ -1175,11 +1466,16 @@ async function startDownload(track) {
     setActiveNav("downloads");
 
     try {
-        if (track.downloadSource === "amazon") await downloadAmazon(job);
-        else await downloadPreview(job);
+        if (track.downloadSource === "amazon") {
+            await downloadAmazon(job);
+        } else if (track.downloadSource === "tidal") {
+            await downloadTidal(job);
+        } else {
+            await downloadPreview(job);
+        }
         job.status = "completed";
         job.progress = 100;
-        job.message = track.downloadSource === "amazon" ? "Lossless copy ready" : "Audio file ready";
+        job.message = (track.downloadSource === "amazon" || track.downloadSource === "tidal") ? "Lossless copy ready" : "Audio file ready";
         showToast("Download complete", track.title);
     } catch (error) {
         if (error.name === "AbortError") {
@@ -1197,20 +1493,31 @@ async function startDownload(track) {
 
 async function downloadAmazon(job) {
     job.status = "downloading";
-    job.message = "Resolving and tagging lossless audio";
+    job.message = "Resolving and tagging Amazon FLAC";
     renderDownloads();
+    const token = await getTurnstileToken();
     const dlUrl = api("/api/download");
-    const handshake = await generateBrowserHandshake("POST", dlUrl);
-    const headers = { "Content-Type": "application/json", ...handshake };
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["X-Turnstile-Token"] = token;
+
+    const amazonTarget = (job.track.downloadSource === "amazon" ? (job.track.amazonAsin || job.track.asin) : null)
+        || job.track.amazonAsin
+        || (job.track.asin && /^[A-Z0-9]{10}$/i.test(job.track.asin) ? job.track.asin : null)
+        || `${job.track.title} ${job.track.artist}`.trim();
+
     const response = await fetch(dlUrl, {
         method: "POST",
         headers,
-        body: JSON.stringify({ input: job.track.downloadInput, quality: state.quality }),
+        body: JSON.stringify({
+            input: amazonTarget,
+            track: job.track,
+            quality: state.quality
+        }),
         signal: job.controller.signal,
     });
     resetTurnstile();
     if (!response.ok) {
-        let message = `Download failed (${response.status})`;
+        let message = `Amazon download failed (${response.status})`;
         try { message = (await response.json()).detail || message; } catch { /* Use fallback. */ }
         throw new Error(message);
     }
@@ -1220,11 +1527,62 @@ async function downloadAmazon(job) {
         const blob = await response.blob();
         const disposition = response.headers.get("content-disposition") || "";
         const encoded = disposition.match(/filename\*=utf-8''([^;]+)/i)?.[1];
-        const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
-        const filename = encoded ? decodeURIComponent(encoded) : plain || `${fileSafe(job.track.title)}.flac`;
+        const rawPlain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        const plain = rawPlain ? decodeURIComponent(rawPlain) : null;
+        const filename = encoded ? decodeURIComponent(encoded) : (plain || `${fileSafe(job.track.title)}.flac`);
         saveBlob(blob, filename);
     } else {
         let errorMsg = "Server did not return an audio stream.";
+        try {
+            const result = await response.json();
+            errorMsg = result.detail || result.message || errorMsg;
+        } catch { /* ignore */ }
+        throw new Error(errorMsg);
+    }
+}
+
+async function downloadTidal(job) {
+    job.status = "downloading";
+    job.message = "Resolving and downloading Tidal FLAC";
+    renderDownloads();
+    const token = await getTurnstileToken();
+    const dlUrl = api("/api/tidal/download");
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["X-Turnstile-Token"] = token;
+
+    const tidalTarget = job.track.tidalAsin
+        || (job.track.downloadSource === "tidal" ? (job.track.asin || job.track.id) : null)
+        || (job.track.asin && /^\d+$/.test(job.track.asin) ? job.track.asin : null)
+        || `${job.track.title} ${job.track.artist}`.trim();
+
+    const response = await fetch(dlUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+            input: tidalTarget,
+            track: job.track,
+            quality: state.quality
+        }),
+        signal: job.controller.signal,
+    });
+    resetTurnstile();
+    if (!response.ok) {
+        let message = `Tidal download failed (${response.status})`;
+        try { message = (await response.json()).detail || message; } catch { /* Use fallback. */ }
+        throw new Error(message);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("audio") || contentType.includes("application/octet-stream")) {
+        const blob = await response.blob();
+        const disposition = response.headers.get("content-disposition") || "";
+        const encoded = disposition.match(/filename\*=utf-8''([^;]+)/i)?.[1];
+        const rawPlain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        const plain = rawPlain ? decodeURIComponent(rawPlain) : null;
+        const filename = encoded ? decodeURIComponent(encoded) : (plain || `${fileSafe(job.track.title)}.flac`);
+        saveBlob(blob, filename);
+    } else {
+        let errorMsg = "Server did not return a Tidal audio stream.";
         try {
             const result = await response.json();
             errorMsg = result.detail || result.message || errorMsg;
@@ -1400,11 +1758,12 @@ function openSettings() {
 function saveSettings(event) {
     event.preventDefault();
     if (dom.qualitySetting) {
-        state.quality = dom.qualitySetting.value;
+        state.quality = dom.qualitySetting.value === "HD" ? "HD" : "UHD";
         localStorage.setItem("clash-quality", state.quality);
     }
     dom.settingsDialog.close();
-    showToast("Settings saved", `Quality set to ${state.quality === "UHD" ? "Ultra HD 24-bit" : "HD 16-bit"}`);
+    const qualityLabel = state.quality === "HD" ? "CD Lossless (16-bit / 44.1 kHz)" : "Ultra HD Master (24-bit / 192 kHz)";
+    showToast("Settings saved", `Quality: ${qualityLabel}`);
 }
 
 function openPlayerSheet() {

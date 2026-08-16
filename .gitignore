@@ -13,6 +13,8 @@ config/
 downloads/
 output/
 temp-dl/
+tidal_tokens.json
+tokens.json
 
 # Node & Frontend
 node_modules/

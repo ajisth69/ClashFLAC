@@ -217,28 +217,30 @@
 
     <dialog class="settings-dialog" id="settings-dialog">
         <form method="dialog" id="settings-form">
-            <div class="dialog-heading"><div><p class="section-kicker">PREFERENCES</p><h2>Settings</h2></div><button class="icon-button" value="cancel" aria-label="Close settings"><svg><use href="#icon-x"></use></svg></button></div>
+            <div class="dialog-heading"><div><p class="section-kicker">AUDIO PREFERENCES</p><h2>Quality Settings</h2></div><button class="icon-button" value="cancel" aria-label="Close settings"><svg><use href="#icon-x"></use></svg></button></div>
+            
             <div class="settings-field">
-                <span class="settings-label">Preferred Download Quality</span>
+                <span class="settings-label">Select Audio Quality</span>
                 <div class="quality-grid" id="quality-selector">
                     <button type="button" class="quality-card active" data-value="UHD">
                         <div class="quality-card-top">
                             <strong>Ultra HD Master</strong>
                             <span class="badge lossless">24-bit / 192 kHz</span>
                         </div>
-                        <p>Studio master fidelity directly from Amazon Music Ultra HD catalog</p>
+                        <p>Studio master resolution (up to 24-bit / 192 kHz) directly from Amazon Music Ultra HD & Tidal Master.</p>
                     </button>
                     <button type="button" class="quality-card" data-value="HD">
                         <div class="quality-card-top">
                             <strong>CD Lossless</strong>
                             <span class="badge">16-bit / 44.1 kHz</span>
                         </div>
-                        <p>Standard uncompressed Red Book CD quality audio</p>
+                        <p>Standard uncompressed Red Book CD quality (16-bit / 44.1 kHz) in bit-perfect FLAC.</p>
                     </button>
                 </div>
                 <input type="hidden" id="quality-setting" value="UHD">
-                <small class="settings-hint">Target format for Amazon Music FLAC audio downloads.</small>
+                <small class="settings-hint">Applied automatically to Amazon Music & Tidal lossless FLAC downloads.</small>
             </div>
+
             <div class="dialog-actions"><button class="secondary-button" value="cancel">Cancel</button><button class="primary-button" id="save-settings" value="default">Save Settings</button></div>
         </form>
     </dialog>

@@ -1,88 +1,103 @@
 # Account Setup & Device Registration Guide
 
-This guide walks you through registering your Amazon Music account and generating the necessary credentials for **ClashFLAC**.
+This guide walks you through registering your accounts and generating the necessary credentials for **Amazon Music** and **TIDAL**.
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-- An active **Amazon Music** account (Free, Prime, or Unlimited).
-- Python 3.10+ installed with project dependencies:
+- Python 3.10+ installed.
+- Install project packages:
   ```bash
   pip install -r requirements.txt
+  pip install -e .
   ```
 
 ---
 
-## Step-by-Step Device Registration
+## 2. Amazon Music Account Registration
 
-### 1. Launch the Registration CLI
-Run the account management tool from the project root:
+### Step 1: Launch Registration CLI
 ```bash
 python amzdl/main.py accounts --add
 ```
 
-### 2. Select Your Account Region
-When prompted, select the geographic region matching your Amazon account:
+### Step 2: Select Geographic Region
+Choose your Amazon account region:
 - `US` &mdash; United States
 - `IN` &mdash; India
 - `GB` &mdash; United Kingdom
 - `DE` &mdash; Germany
 - `JP` &mdash; Japan
-- *(or other available regions)*
 
-### 3. Open the Authorization Link
-The CLI will output an Amazon OAuth login URL. 
-1. Copy the URL and open it in your web browser.
-2. Sign in with your Amazon account credentials.
-3. Authorize the device when prompted.
+### Step 3: Authorize in Browser
+1. Copy the displayed URL into your browser.
+2. Log in and approve access.
+3. Copy the full redirect URL from your browser's address bar and paste it back into the CLI prompt.
 
-### 4. Paste the Redirection URL
-After completing login, your browser will be redirected to a redirect page (or a blank page):
-1. Copy the **entire URL** from your browser's address bar (including `https://...` and all query parameters).
-2. Return to your terminal, paste the copied URL into the prompt, and press **Enter**.
-
-### 5. Confirmation
-The tool will finalize authentication, generate cryptographic device keys, and output confirmation of your registered account name and region.
+### Step 4: Credential Persistence
+Saved locally to `config/credentials.bin` or `~/.config/amzdl/credentials.bin`.
 
 ---
 
-## Credential Persistence
+## 3. TIDAL Account Registration
 
-Once registration succeeds, your session is saved locally in:
-- `~/.config/amzdl/credentials.bin` (or `config/credentials.bin`)
+TIDAL can be setup either via HTTP API endpoints or via the `tidal-dl` CLI.
 
-The backend automatically loads this file when running locally on your machine.
+### Method A: Via API Endpoints (Frontend / Postman)
 
----
+1. **Initiate Device Code:**
+   - `POST /api/tidal/auth/device`
+   - Response returns `user_code` and `verification_uri_complete` (e.g. `https://link.tidal.com/XXXXX`).
+2. **Authorize in Browser:**
+   - Open `https://link.tidal.com/XXXXX` and approve access.
+3. **Extract & Save Credentials:**
+   - `POST /api/tidal/auth/check` with `{"device_code": "..."}`
+   - Tokens are automatically saved to `config/tidal_tokens.json`.
 
-## Cloud Deployment (Railway / Docker)
+*(Alternatively, import pre-existing tokens directly using `POST /api/tidal/auth/set_token`).*
 
-Because binary credential files are excluded from git for security, export your session to a single environment variable when deploying to cloud hosts:
+### Method B: Via CLI Account Manager
 
-### 1. Generate Base64 Session String
-Run this command in your terminal:
 ```bash
-python -c "import base64, pathlib; p = pathlib.Path.home() / '.config/amzdl/credentials.bin'; print(base64.b64encode(p.read_bytes()).decode() if p.exists() else base64.b64encode(pathlib.Path('config/credentials.bin').read_bytes()).decode())"
+# Check current TIDAL account status
+tidal-dl accounts --list
+
+# Register / Login via device code (link.tidal.com)
+tidal-dl accounts --add
+
+# Remove / Logout account
+tidal-dl accounts --remove
+
+# Export session string for cloud deployment
+tidal-dl accounts --export
+
+# Manually set access token
+tidal-dl accounts --token "<ACCESS_TOKEN>" --refresh-token "<REFRESH_TOKEN>"
 ```
 
-### 2. Add to Cloud Environment Variables
-Copy the resulting output string and add it to your cloud platform's environment variables:
-- **Variable Name:** `AMZ_CREDENTIALS_BASE64`
-- **Value:** *(Pasted base64 string)*
+---
 
-The server will automatically restore the credential session into memory on startup.
+## 4. Cloud Deployment (Railway / Docker)
+
+For production deployments without local files, export credentials as Base64 environment variables:
+
+### Amazon Music Credential String:
+```bash
+python -c "import base64, pathlib; p = pathlib.Path('config/credentials.bin'); print(base64.b64encode(p.read_bytes()).decode() if p.exists() else '')"
+```
+- **Environment Variable:** `AMZ_CREDENTIALS_BASE64`
+
+### TIDAL Credential String:
+```bash
+python -c "import base64, pathlib; p = pathlib.Path('config/tidal_tokens.json'); print(base64.b64encode(p.read_bytes()).decode() if p.exists() else '')"
+```
+- **Environment Variable:** `TIDAL_CREDENTIALS_BASE64`
 
 ---
 
-## Managing Accounts
+## 5. Starting the Server
 
-### List Registered Accounts
 ```bash
-python amzdl/main.py accounts --list
-```
-
-### Remove an Account
-```bash
-python amzdl/main.py accounts --remove <customer_id>
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
