@@ -225,14 +225,34 @@ def _build_cover_picture(artwork_path) -> Picture:
         cover_data = img.read()
     pic = Picture()
     pic.type = _FRONT_COVER
-    if cover_data.startswith(b"\x89PNG\r\n\x1a\n"):
-        pic.mime = "image/png"
-    elif cover_data.startswith(b"RIFF") and b"WEBP" in cover_data[:12]:
-        pic.mime = "image/webp"
-    else:
-        pic.mime = "image/jpeg"
     pic.desc = "Front Cover"
-    pic.data = cover_data
+
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(cover_data)) as im:
+            pic.width = im.width
+            pic.height = im.height
+            pic.depth = 24 if im.mode in ("RGB", "P", "L") else 32
+            if im.format == "PNG":
+                pic.mime = "image/png"
+                pic.data = cover_data
+            else:
+                pic.mime = "image/jpeg"
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                out_io = io.BytesIO()
+                im.save(out_io, format="JPEG", quality=95)
+                pic.data = out_io.getvalue()
+    except Exception:
+        if cover_data.startswith(b"\x89PNG\r\n\x1a\n"):
+            pic.mime = "image/png"
+        elif cover_data.startswith(b"RIFF") and b"WEBP" in cover_data[:12]:
+            pic.mime = "image/webp"
+        else:
+            pic.mime = "image/jpeg"
+        pic.data = cover_data
+
     return pic
 
 

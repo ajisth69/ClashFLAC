@@ -152,16 +152,20 @@ class TidalDownloader:
         artists_list = track_meta.get("artists") or []
         tidal_artist_str = ", ".join([a.get("name") for a in artists_list if a.get("name")]) or track_meta.get("artist", {}).get("name")
         artist = (track_hint.get("artist") if track_hint else None) or tidal_artist_str or "Unknown Artist"
+        album_artist = track_meta.get("artist", {}).get("name") or artist
         album_title = (track_hint.get("album") if track_hint else None) or album_meta.get("title") or "Unknown Album"
         track_number = track_hint.get("trackNumber") or track_meta.get("trackNumber") or 1
         disc_number = track_hint.get("discNumber") or track_meta.get("volumeNumber") or 1
         release_date = track_hint.get("releaseDate") or track_meta.get("streamStartDate") or album_meta.get("releaseDate") or ""
         year = str(track_hint.get("year") or (release_date[:4] if release_date else "")) or None
         isrc = track_meta.get("isrc") or track_hint.get("isrc")
-        copyright_str = track_meta.get("copyright")
+        copyright_str = track_meta.get("copyright") or album_meta.get("copyright")
         genre_name = track_hint.get("genre") or track_meta.get("genre") or album_meta.get("genre")
         total_tracks = album_meta.get("numberOfTracks")
         total_discs = album_meta.get("numberOfVolumes")
+        is_explicit = bool(track_meta.get("explicit") or (track_hint.get("explicit") if track_hint else False))
+        replay_gain = track_meta.get("replayGain")
+        peak = track_meta.get("peak")
 
         target_folder = output_base / safe_filename(artist) / safe_filename(album_title)
         target_folder.mkdir(parents=True, exist_ok=True)
@@ -309,6 +313,7 @@ class TidalDownloader:
                 title=title,
                 artist=artist,
                 album=album_title,
+                album_artist=album_artist,
                 track_number=track_number,
                 disc_number=disc_number,
                 year=year,
@@ -320,6 +325,9 @@ class TidalDownloader:
                 genre=genre_name,
                 total_tracks=total_tracks,
                 total_discs=total_discs,
+                is_explicit=is_explicit,
+                replay_gain=replay_gain,
+                peak=peak,
             )
         except Exception as e:
             logger.error(f"Failed applying Vorbis tags to {final_flac_path}: {e}")
@@ -333,8 +341,9 @@ class TidalDownloader:
         title: str,
         artist: str,
         album: str,
-        track_number: int,
-        disc_number: int,
+        album_artist: Optional[str] = None,
+        track_number: int = 1,
+        disc_number: int = 1,
         year: Optional[str] = None,
         release_date: Optional[str] = None,
         isrc: Optional[str] = None,
@@ -344,6 +353,9 @@ class TidalDownloader:
         genre: Optional[str] = None,
         total_tracks: Optional[int] = None,
         total_discs: Optional[int] = None,
+        is_explicit: bool = False,
+        replay_gain: Optional[float] = None,
+        peak: Optional[float] = None,
     ):
         """Apply comprehensive FLAC Vorbis comments and embedded Front Cover picture block."""
         # 1. Strip any legacy/corrupted ID3 header if present
@@ -361,7 +373,8 @@ class TidalDownloader:
         audio["TITLE"] = title
         audio["ARTIST"] = artist
         audio["ALBUM"] = album
-        audio["ALBUMARTIST"] = artist
+        audio["ALBUMARTIST"] = album_artist or artist
+        audio["ALBUM ARTIST"] = album_artist or artist
         audio["TRACKNUMBER"] = str(track_number)
         audio["DISCNUMBER"] = str(disc_number)
         if total_tracks:
@@ -375,31 +388,58 @@ class TidalDownloader:
             audio["YEAR"] = str(year)
         if release_date:
             audio["RELEASEDATE"] = str(release_date)
+            audio["ORIGINALDATE"] = str(release_date)
         if isrc:
             audio["ISRC"] = isrc
         if genre:
             audio["GENRE"] = genre
         if copyright_str:
             audio["COPYRIGHT"] = copyright_str
+            audio["LABEL"] = copyright_str
+            audio["PUBLISHER"] = copyright_str
+            audio["ORGANIZATION"] = copyright_str
+        audio["RATING"] = "Explicit" if is_explicit else "Clean"
+        if replay_gain is not None:
+            audio["REPLAYGAIN_TRACK_GAIN"] = f"{replay_gain:+.2f} dB"
+        if peak is not None:
+            audio["REPLAYGAIN_TRACK_PEAK"] = f"{peak:.6f}"
         if lyrics:
             audio["LYRICS"] = lyrics
             audio["UNSYNCEDLYRICS"] = lyrics
         audio["COMMENT"] = "ClashFLAC Lossless Engine"
+        audio["DESCRIPTION"] = f"{title} - {artist}"
 
-        # 4. Embed Front Cover picture block
+        # 4. Embed Front Cover picture block with explicit dimensions for Windows Explorer thumbnail provider
         if cover_bytes:
             pic = Picture()
             pic.type = 3  # Front Cover
-            if cover_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-                pic.mime = "image/png"
-            elif cover_bytes.startswith(b"\xff\xd8\xff"):
-                pic.mime = "image/jpeg"
-            elif cover_bytes.startswith(b"RIFF") and b"WEBP" in cover_bytes[:12]:
-                pic.mime = "image/webp"
-            else:
-                pic.mime = "image/jpeg"
             pic.desc = "Front Cover"
-            pic.data = cover_bytes
+            try:
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(cover_bytes)) as im:
+                    pic.width = im.width
+                    pic.height = im.height
+                    pic.depth = 24 if im.mode in ("RGB", "P", "L") else 32
+                    if im.format == "PNG":
+                        pic.mime = "image/png"
+                        pic.data = cover_bytes
+                    else:
+                        pic.mime = "image/jpeg"
+                        if im.mode != "RGB":
+                            im = im.convert("RGB")
+                        out_io = io.BytesIO()
+                        im.save(out_io, format="JPEG", quality=95)
+                        pic.data = out_io.getvalue()
+            except Exception:
+                if cover_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                    pic.mime = "image/png"
+                elif cover_bytes.startswith(b"RIFF") and b"WEBP" in cover_bytes[:12]:
+                    pic.mime = "image/webp"
+                else:
+                    pic.mime = "image/jpeg"
+                pic.data = cover_bytes
+
             audio.clear_pictures()
             audio.add_picture(pic)
 
