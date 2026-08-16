@@ -1521,16 +1521,50 @@ async function startDownload(track) {
     setActiveNav("downloads");
 
     try {
-        if (track.downloadSource === "amazon") {
-            await downloadAmazon(job);
-        } else if (track.downloadSource === "tidal") {
+        const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal"));
+        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && track.amazonAsin) || (track.downloadSource === "amazon" && /^[A-Z0-9]{10}$/i.test(track.asin)));
+        
+        let downloaded = false;
+        if (hasTidal && (state.enginePriority === "tidal" || !hasAmazon)) {
+            try {
+                await downloadTidal(job);
+                downloaded = true;
+            } catch (err) {
+                if (hasAmazon) {
+                    await downloadAmazon(job);
+                    downloaded = true;
+                } else {
+                    throw err;
+                }
+            }
+        } else if (hasAmazon) {
+            try {
+                await downloadAmazon(job);
+                downloaded = true;
+            } catch (err) {
+                if (hasTidal) {
+                    await downloadTidal(job);
+                    downloaded = true;
+                } else {
+                    throw err;
+                }
+            }
+        } else if (hasTidal) {
             await downloadTidal(job);
+            downloaded = true;
         } else {
-            await downloadPreview(job);
+            // If neither ASIN is present, attempt Tidal lossless resolution by Title + Artist first
+            try {
+                await downloadTidal(job);
+                downloaded = true;
+            } catch {
+                await downloadPreview(job);
+                downloaded = true;
+            }
         }
         job.status = "completed";
         job.progress = 100;
-        job.message = (track.downloadSource === "amazon" || track.downloadSource === "tidal") ? "Lossless copy ready" : "Audio file ready";
+        job.message = "Lossless copy ready";
         showToast("Download complete", track.title);
     } catch (error) {
         if (error.name === "AbortError") {
