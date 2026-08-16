@@ -847,6 +847,7 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
         album: item.album || spotify?.album || "",
         duration: Number(item.duration_sec || 0),
     };
+    const playableCandidates = (previewItems || []).filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(base.title, candidate.name || candidate.title));
     const hasArtist = Boolean(artist && !normalize(artist).includes("unknown"));
     return bestMatch(base, playableCandidates, previewArtists, {
         minScore: hasArtist ? 18 : 14,
