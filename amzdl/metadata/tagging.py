@@ -225,8 +225,13 @@ def _build_cover_picture(artwork_path) -> Picture:
         cover_data = img.read()
     pic = Picture()
     pic.type = _FRONT_COVER
-    pic.mime = "image/jpeg"
-    pic.desc = "Cover"
+    if cover_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        pic.mime = "image/png"
+    elif cover_data.startswith(b"RIFF") and b"WEBP" in cover_data[:12]:
+        pic.mime = "image/webp"
+    else:
+        pic.mime = "image/jpeg"
+    pic.desc = "Front Cover"
     pic.data = cover_data
     return pic
 

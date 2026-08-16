@@ -640,13 +640,22 @@ async function searchSpotify(query, signal) {
 }
 
 async function searchPreviews(query, signal) {
-    try {
-        const data = await requestJson(`${PREVIEW_API}/search/songs?query=${encodeURIComponent(query)}`, { signal });
-        return data?.success && Array.isArray(data?.data?.results) ? data.data.results : [];
-    } catch (e) {
-        console.warn("Preview search notice:", e);
-        return [];
+    const endpoints = [
+        `${PREVIEW_API}/search/songs?query=${encodeURIComponent(query)}&limit=15`,
+        `https://saavn.me/api/search/songs?query=${encodeURIComponent(query)}&limit=15`
+    ];
+    for (const ep of endpoints) {
+        try {
+            const data = await requestJson(ep, { signal });
+            const list = Array.isArray(data?.data?.results) ? data.data.results : (Array.isArray(data?.data) ? data.data : []);
+            if (list && list.length > 0) {
+                return list;
+            }
+        } catch (e) {
+            // try next fallback preview endpoint
+        }
     }
+    return [];
 }
 
 async function findCatalogPreviewCandidates(catalogItems, spotifyItems, initialCandidates, signal) {

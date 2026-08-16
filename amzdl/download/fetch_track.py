@@ -13,7 +13,7 @@ import requests
 
 from amzdl.download.keys import Keys
 from amzdl.download.mpd_info import _AUDIO_EXTENSIONS, find_representation
-from amzdl.metadata.lyrics import Lyrics
+from amzdl.metadata.lyrics import Lyrics, LyricsLine
 from amzdl.metadata.metadata import TrackMetadata, resolve_track_cover
 from amzdl.metadata.tagging import download_artwork, tag_track
 from amzdl.remux.decrypt import decrypt_mp4
@@ -194,6 +194,35 @@ async def process_track(
 
         step("tagging metadata")
         lyrics_obj = Lyrics.from_xray(lyrics_resp)
+        if not lyrics_obj.has_content():
+            try:
+                import requests
+                import re
+                clean_artist = track.artist.split(",")[0].split("&")[0].replace("feat.", "").strip()
+                lrc_resp = requests.get(
+                    "https://lrclib.net/api/get",
+                    params={"track_name": track.title, "artist_name": clean_artist, "album_name": track.album_name or ""},
+                    headers={"User-Agent": "ClashFLAC/2.2.0"},
+                    timeout=5
+                )
+                if lrc_resp.status_code == 200:
+                    lrc_data = lrc_resp.json()
+                    synced = lrc_data.get("syncedLyrics")
+                    plain = lrc_data.get("plainLyrics")
+                    if synced:
+                        parsed_lines = []
+                        for l in synced.splitlines():
+                            m = re.match(r"\[(\d+):(\d+(?:\.\d+)?)\](.*)", l)
+                            if m:
+                                mins, secs, txt = int(m.group(1)), float(m.group(2)), m.group(3)
+                                parsed_lines.append(LyricsLine(timestamp_ms=int((mins * 60 + secs) * 1000), text=txt))
+                        if parsed_lines:
+                            lyrics_obj = Lyrics(lines=parsed_lines)
+                    elif plain:
+                        lyrics_obj = Lyrics(lines=[LyricsLine(timestamp_ms=None, text=line.strip()) for line in plain.splitlines() if line.strip()])
+            except Exception as e:
+                _log.warning("LRCLIB fallback notice for Amazon track: %s", e)
+
         await asyncio.to_thread(
             tag_track, str(media_temp), track, lyrics_obj, str(temp_dir), tag_mode,
             artwork_path,
