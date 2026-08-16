@@ -104,6 +104,7 @@ from amzdl.api.amzn_api import AmazonMusicMobileAPI
 from amazonmusic.models import AmazonRegion
 from amzdl.download.download import download as amzdl_download
 from amzdl.metadata.metadata import fetch_metadata
+from download_progress import get as get_download_progress, update as update_download_progress
 
 from tidal import tidal_router
 
@@ -815,6 +816,7 @@ async def resolve_query_endpoint(q: str):
 async def download_endpoint(
     req: DownloadRequest,
     x_turnstile_token: Optional[str] = Header(default=None, alias="X-Turnstile-Token"),
+    x_download_job_id: Optional[str] = Header(default=None, alias="X-Download-Job-ID"),
     request: Request = None
 ):
     """
@@ -823,6 +825,7 @@ async def download_endpoint(
     await verify_turnstile_token(x_turnstile_token, request)
     async with DOWNLOAD_SEMAPHORE:
         try:
+            update_download_progress(x_download_job_id, "Resolving Amazon Music track", 8)
             resolved_input = await resolve_external_url(req.input)
             input_str = resolved_input.strip()
 
@@ -841,6 +844,7 @@ async def download_endpoint(
                     raise HTTPException(status_code=404, detail=f"Track '{input_str}' not found on Amazon Music")
                 asin = search_hits[0].asin
 
+            update_download_progress(x_download_job_id, "Fetching Amazon metadata", 18)
             # Fetch metadata using fetch_metadata in worker thread
             kind, meta = await asyncio.to_thread(fetch_metadata, resolver.session, asin)
 
@@ -877,6 +881,7 @@ async def download_endpoint(
             if quality_target not in {"HD", "UHD"}:
                 raise HTTPException(status_code=422, detail="Quality must be either HD or UHD")
 
+            update_download_progress(x_download_job_id, "Downloading and decrypting Amazon audio", 35)
             await amzdl_download(
                 session=resolver.session,
                 asin=asin,
@@ -887,6 +892,7 @@ async def download_endpoint(
                 metadata_concurrency=4
             )
 
+            update_download_progress(x_download_job_id, "Writing FLAC metadata and artwork", 90)
             # For single track downloads, return the file directly to the browser
             if kind == "track":
                 extension = ".flac"
@@ -908,6 +914,7 @@ async def download_endpoint(
                         file_path = audio_candidates[0]
                 
                 if file_path.exists():
+                    update_download_progress(x_download_job_id, "Finalizing download", 98)
                     return FileResponse(
                         path=str(file_path),
                         media_type="audio/flac",
@@ -924,6 +931,7 @@ async def download_endpoint(
             else:
                 message = f"Successfully downloaded {kind} '{display_name}'"
 
+            update_download_progress(x_download_job_id, "Download complete", 100)
             return DownloadResponse(
                 status="success",
                 message=message,
@@ -936,12 +944,20 @@ async def download_endpoint(
                 track_count=track_count
             )
         except HTTPException as he:
+            update_download_progress(x_download_job_id, "Download failed", 100, error=he.detail)
             raise he
         except Exception as e:
             logger.exception("Failed to download track/album")
+            update_download_progress(x_download_job_id, "Download failed", 100, error=str(e))
             raise HTTPException(status_code=500, detail=str(e))
         finally:
             free_memory()
+
+
+@app.get("/api/downloads/status/{job_id}")
+async def download_status(job_id: str):
+    """Return the most recent server-side stage for an active download."""
+    return get_download_progress(job_id) or {"stage": "Preparing download", "progress": 0}
 
 
 @app.get("/health")

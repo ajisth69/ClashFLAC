@@ -16,6 +16,7 @@ from .config import TidalConfig
 from .auth import TidalAuth
 from .api import TidalAPI
 from .downloader import TidalDownloader
+from download_progress import update as update_download_progress
 from .models import (
     TidalSearchResultItem,
     TidalTrackResponse,
@@ -161,6 +162,7 @@ async def verify_turnstile_download(
 async def download_endpoint(
     req: TidalDownloadRequest,
     x_turnstile_token: Optional[str] = Header(default=None, alias="X-Turnstile-Token"),
+    x_download_job_id: Optional[str] = Header(default=None, alias="X-Download-Job-ID"),
     request: Request = None
 ):
     """
@@ -169,6 +171,7 @@ async def download_endpoint(
     await verify_turnstile_download(x_turnstile_token, request)
     async with DOWNLOAD_SEMAPHORE:
         try:
+            update_download_progress(x_download_job_id, "Resolving Tidal track", 8)
             import uuid
             job_id = uuid.uuid4().hex[:12]
             output_dir = (Path("downloads/tidal") / f"job_{job_id}").resolve()
@@ -178,10 +181,12 @@ async def download_endpoint(
                 track_id_or_input=req.input,
                 output_dir=output_dir,
                 quality=req.quality or "HD",
-                track_hint=req.track
+                track_hint=req.track,
+                progress_callback=lambda stage, progress: update_download_progress(x_download_job_id, stage, progress),
             )
 
             if file_path and file_path.exists():
+                update_download_progress(x_download_job_id, "Sending completed Tidal FLAC", 100)
                 return FileResponse(
                     path=str(file_path),
                     media_type="audio/flac",
@@ -196,9 +201,11 @@ async def download_endpoint(
                 raise HTTPException(status_code=500, detail="Downloaded Tidal audio file could not be located.")
 
         except HTTPException as he:
+            update_download_progress(x_download_job_id, "Download failed", 100, error=he.detail)
             raise he
         except Exception as e:
             logger.exception(f"Failed to download Tidal track for '{req.input}': {e}")
+            update_download_progress(x_download_job_id, "Download failed", 100, error=str(e))
             raise HTTPException(status_code=500, detail=str(e))
         finally:
             free_memory()

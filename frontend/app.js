@@ -567,10 +567,9 @@ async function handleSearch(event) {
         const tidal = tidalResult.status === "fulfilled" && Array.isArray(tidalResult.value) ? tidalResult.value : [];
         const spotify = spotifyResult.status === "fulfilled" && Array.isArray(spotifyResult.value) ? spotifyResult.value : [];
         const initialPreviews = previewResult.status === "fulfilled" && Array.isArray(previewResult.value) ? previewResult.value : [];
-        
         const allCatalogItems = [...amazon, ...tidal];
         const previews = allCatalogItems.length
-            ? await findCatalogPreviewCandidates(allCatalogItems, spotify, initialPreviews, state.searchController.signal)
+            ? await findCatalogPreviewCandidates(allCatalogItems, initialPreviews, state.searchController.signal)
             : [];
         if (state.searchController.signal.aborted) return;
         state.results = mergeSearchSources(amazon, tidal, spotify, previews);
@@ -644,38 +643,30 @@ async function searchPreviews(query, signal) {
     try {
         const data = await requestJson(`${PREVIEW_API}/search/songs?query=${encodeURIComponent(query.trim())}&limit=40`, { signal });
         return data?.success && Array.isArray(data?.data?.results) ? data.data.results : [];
-    } catch (e) {
-        console.warn("Preview search notice:", e);
+    } catch (error) {
+        console.warn("Preview search notice:", error);
         return [];
     }
 }
 
-async function findCatalogPreviewCandidates(catalogItems, spotifyItems, initialCandidates, signal) {
+async function findCatalogPreviewCandidates(catalogItems, initialCandidates, signal) {
     const searchQueries = new Set();
-
     catalogItems.forEach((item) => {
-        const cleanT = cleanTitle(item.title);
-        const tokens = cleanArtistTokens(item.artist);
-        const primaryArtist = tokens[0] || "";
-
-        if (cleanT) searchQueries.add(cleanT);
-        if (cleanT && primaryArtist) searchQueries.add(`${cleanT} ${primaryArtist}`);
-        if (primaryArtist && primaryArtist.length > 2) searchQueries.add(primaryArtist);
+        const title = cleanTitle(item.title);
+        const primaryArtist = cleanArtistTokens(item.artist)[0] || "";
+        if (title) searchQueries.add(title);
+        if (title && primaryArtist) searchQueries.add(`${title} ${primaryArtist}`);
+        if (primaryArtist.length > 2) searchQueries.add(primaryArtist);
     });
 
-    const uniqueQueries = [...searchQueries].slice(0, 20);
-    if (!uniqueQueries.length) return initialCandidates;
-
-    const searches = await Promise.allSettled(uniqueQueries.map((query) => searchPreviews(query, signal)));
+    const searches = await Promise.allSettled(
+        [...searchQueries].slice(0, 20).map((query) => searchPreviews(query, signal))
+    );
     if (signal.aborted) return [];
-
     const candidates = [...initialCandidates];
     searches.forEach((result) => {
-        if (result.status === "fulfilled" && Array.isArray(result.value)) {
-            candidates.push(...result.value);
-        }
+        if (result.status === "fulfilled" && Array.isArray(result.value)) candidates.push(...result.value);
     });
-
     return [...new Map(candidates.map((item) => [item.id || getPreviewUrl(item) || item.url, item])).values()];
 }
 
@@ -796,12 +787,10 @@ function previewArtists(item) {
 
 const VERSION_MARKERS = ["acoustic", "ambient", "cover", "extended", "instrumental", "karaoke", "live", "nightcore", "radio edit", "remix", "slowed", "sped up", "techno"];
 
-function hasVersionMarker(title, marker) {
-    return ` ${normalize(title)} `.includes(` ${marker} `);
-}
-
 function versionsCompatible(catalogTitle, previewTitle) {
-    return VERSION_MARKERS.every((marker) => hasVersionMarker(catalogTitle, marker) === hasVersionMarker(previewTitle, marker));
+    return VERSION_MARKERS.every((marker) =>
+        ` ${normalize(catalogTitle)} `.includes(` ${marker} `) === ` ${normalize(previewTitle)} `.includes(` ${marker} `)
+    );
 }
 
 function isExactSpotifyMatch(base, spotify) {
@@ -839,21 +828,13 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
         { minScore: 16, requireArtist: Boolean(rawArtist) }
     );
     const spotify = isExactSpotifyMatch(item, rawSpotify) ? rawSpotify : null;
-
     const artist = rawArtist || spotify?.artist || "Unknown artist";
-    const base = {
-        title: item.title || "Unknown title",
-        artist,
-        album: item.album || spotify?.album || "",
-        duration: Number(item.duration_sec || 0),
-    };
-    const playableCandidates = (previewItems || []).filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(base.title, candidate.name || candidate.title));
-    const hasArtist = Boolean(artist && !normalize(artist).includes("unknown"));
-    return bestMatch(base, playableCandidates, previewArtists, {
-        minScore: hasArtist ? 18 : 14,
-        requireArtist: hasArtist,
-        durationTolerance: 8,
-    });
+    return bestMatch(
+        { title: item.title || "Unknown title", artist, album: item.album || spotify?.album || "", duration: Number(item.duration_sec || 0) },
+        (previewItems || []).filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(item.title, candidate.name || candidate.title)),
+        previewArtists,
+        { minScore: normalize(artist).includes("unknown") ? 14 : 18, requireArtist: !normalize(artist).includes("unknown"), durationTolerance: 8 }
+    );
 }
 
 function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems) {
@@ -887,7 +868,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
         }
         matchedAmazonAsins.add(String(amzItem.asin));
 
-        // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
+        // JioSaavn is playback-only; download routing below remains Amazon/Tidal only.
         const preview = findCatalogPreview(amzItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
@@ -961,7 +942,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
         );
         const spotify = isExactSpotifyMatch(tItem, rawSpotify) ? rawSpotify : null;
 
-        // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
+        // JioSaavn is playback-only; download routing below remains Amazon/Tidal only.
         const preview = findCatalogPreview(tItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
@@ -1515,10 +1496,11 @@ async function startDownload(track) {
     }
 
     const controller = new AbortController();
-    const job = { id: crypto.randomUUID?.() || `download-${Date.now()}`, track, controller, status: "preparing", progress: 0, message: "Preparing source" };
+    const job = { id: crypto.randomUUID?.() || `download-${Date.now()}`, track, controller, status: "preparing", progress: 0, message: "Preparing source", progressTimer: null };
     state.downloads.unshift(job);
     renderDownloads();
     setActiveNav("downloads");
+    watchDownloadProgress(job);
 
     try {
         const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal"));
@@ -1547,12 +1529,8 @@ async function startDownload(track) {
                 }
             }
         } else {
-            // No ASIN at all — try Tidal search by title+artist, fallback to preview
-            try {
-                await downloadTidal(job);
-            } catch {
-                await downloadPreview(job);
-            }
+            // No ASIN at all — resolve through Tidal only; never download preview audio.
+            await downloadTidal(job);
         }
         job.status = "completed";
         job.progress = 100;
@@ -1568,8 +1546,31 @@ async function startDownload(track) {
             showToast("Download failed", job.message, "error");
         }
     } finally {
+        stopWatchingDownloadProgress(job);
         renderDownloads();
     }
+}
+
+function watchDownloadProgress(job) {
+    const refresh = async () => {
+        if (!job || !["preparing", "downloading"].includes(job.status)) return;
+        try {
+            const status = await requestJson(api(`/api/downloads/status/${encodeURIComponent(job.id)}`), { signal: job.controller.signal });
+            if (status?.stage) job.message = status.stage;
+            if (Number.isFinite(Number(status?.progress))) job.progress = Math.max(job.progress || 0, Number(status.progress));
+            if (status?.error) job.message = status.error;
+            renderDownloads();
+        } catch (error) {
+            if (error.name !== "AbortError") console.debug("Download progress unavailable:", error.message);
+        }
+    };
+    refresh();
+    job.progressTimer = window.setInterval(refresh, 650);
+}
+
+function stopWatchingDownloadProgress(job) {
+    if (job?.progressTimer) window.clearInterval(job.progressTimer);
+    if (job) job.progressTimer = null;
 }
 
 async function downloadAmazon(job) {
@@ -1579,6 +1580,7 @@ async function downloadAmazon(job) {
     const token = await getTurnstileToken();
     const dlUrl = api("/api/download");
     const headers = { "Content-Type": "application/json" };
+    headers["X-Download-Job-ID"] = job.id;
     if (token) headers["X-Turnstile-Token"] = token;
 
     const amazonTarget = (job.track.downloadSource === "amazon" ? (job.track.amazonAsin || job.track.asin) : null)
@@ -1629,6 +1631,7 @@ async function downloadTidal(job) {
     const token = await getTurnstileToken();
     const dlUrl = api("/api/tidal/download");
     const headers = { "Content-Type": "application/json" };
+    headers["X-Download-Job-ID"] = job.id;
     if (token) headers["X-Turnstile-Token"] = token;
 
     const tidalTarget = job.track.tidalAsin
@@ -1670,36 +1673,6 @@ async function downloadTidal(job) {
         } catch { /* ignore */ }
         throw new Error(errorMsg);
     }
-}
-
-async function downloadPreview(job) {
-    job.status = "downloading";
-    job.message = "Downloading preview source";
-    renderDownloads();
-    const streamUrl = await resolvePreview(job.track, job.controller.signal);
-    const response = await fetch(streamUrl, { signal: job.controller.signal });
-    if (!response.ok) throw new Error(`Audio source returned ${response.status}`);
-    const total = Number(response.headers.get("content-length") || 0);
-    if (!response.body) {
-        saveBlob(await response.blob(), `${fileSafe(job.track.title)}.m4a`);
-        return;
-    }
-
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        if (total) {
-            job.progress = Math.min(99, Math.round((received / total) * 100));
-            job.message = `${job.progress}% downloaded`;
-            renderDownloads();
-        }
-    }
-    saveBlob(new Blob(chunks, { type: response.headers.get("content-type") || "audio/mp4" }), `${fileSafe(job.track.title)}.m4a`);
 }
 
 function saveBlob(blob, filename) {

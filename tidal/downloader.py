@@ -5,7 +5,7 @@ import logging
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Callable
 import httpx
 import mutagen
 from mutagen.flac import FLAC, Picture
@@ -73,7 +73,8 @@ class TidalDownloader:
         track_id_or_input: str,
         output_dir: Optional[Path] = None,
         quality: str = "HD",
-        track_hint: Optional[Dict[str, Any]] = None
+        track_hint: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[str, int], None]] = None,
     ) -> Path:
         """
         Download and tag a single Tidal track with 100% accurate metadata and embedded Front Cover picture.
@@ -82,6 +83,10 @@ class TidalDownloader:
         output_base = (output_dir or Path("downloads/tidal")).resolve()
         output_base.mkdir(parents=True, exist_ok=True)
         track_hint = track_hint or {}
+
+        def report(stage: str, progress: int) -> None:
+            if progress_callback:
+                progress_callback(stage, progress)
 
         target_title = track_hint.get("title") or ""
         target_artist = track_hint.get("artist") or ""
@@ -115,6 +120,7 @@ class TidalDownloader:
         if not candidate_ids:
             raise Exception(f"Track '{track_id_or_input}' not found on Tidal")
 
+        report("Resolving Tidal stream", 18)
         # 2. Resolve Stream URL across best candidates
         stream_url = None
         codec = "flac"
@@ -148,6 +154,7 @@ class TidalDownloader:
         track_meta = raw_track_meta or (await self.api.get_track(track_id))
         album_meta = track_meta.get("album") or {}
 
+        report("Reading Tidal metadata", 28)
         # 3. Construct Unified Metadata (Frontend hint prioritized, Tidal enriched)
         title = (track_hint.get("title") if track_hint else None) or track_meta.get("title") or "Unknown Title"
         artists_list = track_meta.get("artists") or []
@@ -177,6 +184,7 @@ class TidalDownloader:
         temp_file_path = target_folder / f"{base_name}.part"
         temp_file_path.parent.mkdir(parents=True, exist_ok=True)
 
+        report("Downloading Tidal audio", 40)
         # 4. Stream Download Chunks
         if isinstance(stream_url, dict) and stream_url.get("is_dash"):
             init_url = stream_url["init_url"]
@@ -204,6 +212,7 @@ class TidalDownloader:
                         async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
                             f_out.write(chunk)
 
+        report("Decrypting audio stream", 65)
         # 5. Decrypt if AES encrypted
         if encryption_key:
             try:
@@ -215,6 +224,7 @@ class TidalDownloader:
             except Exception as e:
                 logger.warning(f"Error during AES stream decryption: {e}")
 
+        report("Packaging lossless FLAC", 75)
         # 6. Remux to FLAC container
         if temp_file_path.exists():
             with open(temp_file_path, "rb") as f_check:
@@ -245,6 +255,7 @@ class TidalDownloader:
         else:
             raise Exception("Downloaded audio file was not written.")
 
+        report("Fetching artwork", 82)
         # 7. Fetch High-Resolution Cover Image (PNG or JPEG)
         cover_bytes = None
         cover_urls_to_try = []
@@ -275,6 +286,7 @@ class TidalDownloader:
                 except Exception as e:
                     logger.warning(f"Notice fetching cover from {c_url}: {e}")
 
+        report("Fetching lyrics", 88)
         # 8. Fetch Synchronized Lyrics (Tidal native -> LRCLIB fallback)
         lyrics = await self.api.get_lyrics(track_id)
         if not lyrics:
@@ -308,6 +320,7 @@ class TidalDownloader:
             except Exception as lrc_err:
                 logger.warning(f"LRCLIB fallback notice: {lrc_err}")
 
+        report("Embedding metadata and artwork", 94)
         # 9. Apply Bit-Perfect Vorbis Tags & Front Cover Picture
         try:
             self._apply_flac_tags(
@@ -334,6 +347,7 @@ class TidalDownloader:
         except Exception as e:
             logger.error(f"Failed applying Vorbis tags to {final_flac_path}: {e}")
 
+        report("Tidal FLAC ready", 100)
         logger.info(f"Successfully processed & tagged Tidal FLAC track: {final_flac_path.name}")
         return final_flac_path
 
