@@ -175,6 +175,7 @@ class TidalDownloader:
         base_name = f"{disc_number}-{track_num_str} {safe_filename(title)}"
         final_flac_path = target_folder / f"{base_name}.flac"
         temp_file_path = target_folder / f"{base_name}.part"
+        temp_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 4. Stream Download Chunks
         if isinstance(stream_url, dict) and stream_url.get("is_dash"):
