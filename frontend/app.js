@@ -1511,9 +1511,10 @@ async function startDownload(track) {
             try {
                 await downloadTidal(job);
             } catch (err) {
-                if (hasAmazon) {
+                // If Tidal is paywalled/restricted on this account, automatically fall back to Amazon Music
+                try {
                     await downloadAmazon(job);
-                } else {
+                } catch {
                     throw err;
                 }
             }
@@ -1521,16 +1522,24 @@ async function startDownload(track) {
             try {
                 await downloadAmazon(job);
             } catch (err) {
-                // Last resort: try Tidal search by title+artist
+                // Fallback to Tidal
                 try {
                     await downloadTidal(job);
                 } catch {
-                    throw err; // throw original Amazon error
+                    throw err;
                 }
             }
         } else {
-            // No ASIN at all — resolve through Tidal only; never download preview audio.
-            await downloadTidal(job);
+            // No ASIN at all — try Tidal first, then Amazon fallback
+            try {
+                await downloadTidal(job);
+            } catch (err) {
+                try {
+                    await downloadAmazon(job);
+                } catch {
+                    throw err;
+                }
+            }
         }
         job.status = "completed";
         job.progress = 100;
