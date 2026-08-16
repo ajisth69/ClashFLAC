@@ -5,12 +5,16 @@ const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 const savedApi = localStorage.getItem("clash-api-base");
 const activeApi = isLocalDev
   ? DEFAULT_API_BASE
-  : ((!savedApi || savedApi === "https://clashflac.up.railway.app" || savedApi.startsWith("https://clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
+  : ((!savedApi || savedApi.includes("clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
+
+// Ensure stale engine-priority defaults to Tidal
+const savedPriority = localStorage.getItem("clash-engine-priority");
+const activePriority = (savedPriority === "amazon" || !savedPriority) ? "tidal" : savedPriority;
 
 const state = {
     apiBase: activeApi,
     quality: localStorage.getItem("clash-quality") || "UHD",
-    enginePriority: localStorage.getItem("clash-engine-priority") || "tidal",
+    enginePriority: activePriority,
     embedArt: localStorage.getItem("clash-embed-art") !== "false",
     embedLyrics: localStorage.getItem("clash-embed-lyrics") !== "false",
     theme: localStorage.getItem("clash-theme") || "light",
