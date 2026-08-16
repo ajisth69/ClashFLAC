@@ -1506,42 +1506,30 @@ async function startDownload(track) {
     watchDownloadProgress(job);
 
     try {
-        const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal"));
-        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && /^[A-Z0-9]{10}$/i.test(track.amazonAsin)));
+        const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal") || (track.asin && /^\d+$/.test(track.asin)));
+        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && /^[A-Z0-9]{10}$/i.test(track.amazonAsin)) || (track.asin && /^[A-Z0-9]{10}$/i.test(track.asin)));
         
-        // ALWAYS try Tidal first when available — it embeds full metadata + cover art
+        // Strict Lossless Engine: ONLY Tidal FLAC or Amazon FLAC (JioSaavn preview is NEVER downloaded)
         if (hasTidal) {
             try {
                 await downloadTidal(job);
             } catch (err) {
-                // If Tidal is paywalled/restricted on this account, automatically fall back to Amazon Music
-                try {
-                    await downloadAmazon(job);
-                } catch {
-                    throw err;
-                }
+                // If Tidal download fails, attempt Amazon Music Lossless fallback
+                await downloadAmazon(job);
             }
         } else if (hasAmazon) {
             try {
                 await downloadAmazon(job);
             } catch (err) {
-                // Fallback to Tidal
-                try {
-                    await downloadTidal(job);
-                } catch {
-                    throw err;
-                }
+                // If Amazon download fails, attempt Tidal Lossless fallback
+                await downloadTidal(job);
             }
         } else {
-            // No ASIN at all — try Tidal first, then Amazon fallback
+            // Default: query Tidal Lossless engine first, then Amazon Lossless engine
             try {
                 await downloadTidal(job);
             } catch (err) {
-                try {
-                    await downloadAmazon(job);
-                } catch {
-                    throw err;
-                }
+                await downloadAmazon(job);
             }
         }
         job.status = "completed";
