@@ -81,10 +81,11 @@ class TidalDownloader:
         """
         output_base = (output_dir or Path("downloads/tidal")).resolve()
         output_base.mkdir(parents=True, exist_ok=True)
+        track_hint = track_hint or {}
 
-        target_title = (track_hint.get("title") if track_hint else None) or ""
-        target_artist = (track_hint.get("artist") if track_hint else None) or ""
-        target_duration = int(track_hint.get("duration") or track_hint.get("duration_sec") or 0) if track_hint else 0
+        target_title = track_hint.get("title") or ""
+        target_artist = track_hint.get("artist") or ""
+        target_duration = int(track_hint.get("duration") or track_hint.get("duration_sec") or 0)
 
         # 1. Resolve Candidate Track IDs
         track_id = self.api.extract_track_id(track_id_or_input)
