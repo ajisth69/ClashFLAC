@@ -16,3 +16,4 @@ requests
 rsa==4.9
 tqdm==4.66.1
 xmltodict==0.13.0
+imageio-ffmpeg>=0.4.9

@@ -17,6 +17,23 @@ from amzdl.remux.remux import remux_flac
 
 logger = logging.getLogger("tidal.downloader")
 
+import shutil
+
+def get_ffmpeg_binary() -> str:
+    """Resolve ffmpeg binary from system PATH, imageio-ffmpeg, or standard Linux paths."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/var/nix/profiles/default/bin/ffmpeg"):
+        if Path(path).is_file():
+            return path
+    return "ffmpeg"
+
 def safe_filename(name: Optional[str], fallback: str = "track") -> str:
     if not name:
         return fallback
@@ -238,7 +255,8 @@ class TidalDownloader:
                 # Convert MP4/AAC/DASH container stream to genuine bit-perfect PCM FLAC using ffmpeg
                 converted = False
                 try:
-                    cmd = ["ffmpeg", "-y", "-i", str(temp_file_path), "-c:a", "flac", str(final_flac_path)]
+                    ffmpeg_exe = get_ffmpeg_binary()
+                    cmd = [ffmpeg_exe, "-y", "-i", str(temp_file_path), "-c:a", "flac", str(final_flac_path)]
                     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     if final_flac_path.exists() and final_flac_path.stat().st_size > 1000:
                         converted = True
