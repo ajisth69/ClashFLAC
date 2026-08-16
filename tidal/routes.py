@@ -177,7 +177,8 @@ async def download_endpoint(
             file_path = await downloader.download_track(
                 track_id_or_input=req.input,
                 output_dir=output_dir,
-                quality=req.quality or "HD"
+                quality=req.quality or "HD",
+                track_hint=req.track
             )
 
             if file_path and file_path.exists():

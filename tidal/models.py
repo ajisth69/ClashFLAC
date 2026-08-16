@@ -38,6 +38,7 @@ class TidalResolveRequest(BaseModel):
 
 class TidalDownloadRequest(BaseModel):
     input: str
+    track: Optional[Dict[str, Any]] = None
     quality: Optional[str] = "HD"
 
 class TidalDownloadResponse(BaseModel):

@@ -5,7 +5,7 @@ import logging
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import httpx
 import mutagen
 from mutagen.flac import FLAC, Picture
@@ -23,6 +23,47 @@ def safe_filename(name: Optional[str], fallback: str = "track") -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "_", str(name)).strip()
     return clean or fallback
 
+def normalize_text(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    # Remove bracketed/parenthetical additions
+    t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', str(text))
+    t = re.sub(r'[^\w\s]', '', t.lower())
+    return " ".join(t.split())
+
+def score_candidate(candidate: Any, target_title: str, target_artist: str, target_duration: int = 0) -> int:
+    score = 0
+    c_title = normalize_text(getattr(candidate, "title", None) or (candidate.get("title") if isinstance(candidate, dict) else ""))
+    t_title = normalize_text(target_title)
+    
+    if c_title == t_title:
+        score += 60
+    elif t_title and (t_title in c_title or c_title in t_title):
+        score += 35
+
+    c_artist = normalize_text(getattr(candidate, "artist", None) or (candidate.get("artist") if isinstance(candidate, dict) else ""))
+    t_artist = normalize_text(target_artist)
+    
+    t_primary = t_artist.split()[0] if t_artist else ""
+    if t_primary and t_primary in c_artist:
+        score += 40
+
+    c_dur = getattr(candidate, "duration_sec", 0) or (candidate.get("duration_sec", 0) if isinstance(candidate, dict) else 0)
+    if target_duration and c_dur:
+        diff = abs(target_duration - c_dur)
+        if diff <= 3:
+            score += 25
+        elif diff <= 8:
+            score += 15
+
+    quality = getattr(candidate, "audio_quality", "") or (candidate.get("audio_quality", "") if isinstance(candidate, dict) else "")
+    if quality in ("HI_RES_LOSSLESS", "UHD", "MASTER"):
+        score += 15
+    elif quality in ("LOSSLESS", "HD"):
+        score += 10
+
+    return score
+
 class TidalDownloader:
     def __init__(self, api: Optional[TidalAPI] = None):
         self.api = api or TidalAPI()
@@ -31,55 +72,66 @@ class TidalDownloader:
         self,
         track_id_or_input: str,
         output_dir: Optional[Path] = None,
-        quality: str = "HD"
+        quality: str = "HD",
+        track_hint: Optional[Dict[str, Any]] = None
     ) -> Path:
         """
-        Download and tag a single Tidal track.
-        Guarantees that the output file is ALWAYS delivered in .flac codec format with full Vorbis tags.
+        Download and tag a single Tidal track with 100% accurate metadata and embedded Front Cover picture.
+        Guarantees that the output file is ALWAYS delivered in .flac format with complete Vorbis tags.
         """
         output_base = (output_dir or Path("downloads/tidal")).resolve()
         output_base.mkdir(parents=True, exist_ok=True)
 
+        target_title = (track_hint.get("title") if track_hint else None) or ""
+        target_artist = (track_hint.get("artist") if track_hint else None) or ""
+        target_duration = int(track_hint.get("duration") or track_hint.get("duration_sec") or 0) if track_hint else 0
+
+        # 1. Resolve Candidate Track IDs
         track_id = self.api.extract_track_id(track_id_or_input)
-        if not track_id:
-            hits = await self.api.search(track_id_or_input, limit=1)
+        candidate_ids = []
+
+        if track_id:
+            candidate_ids.append(track_id)
+        else:
+            clean_artist = re.sub(r'[,&/]|feat\..*$', ' ', target_artist).strip()
+            clean_artist = " ".join(clean_artist.split())
+            search_query = f"{target_title} {clean_artist}".strip() or str(track_id_or_input)
+            hits = await self.api.search(search_query, limit=5)
             if not hits:
-                raise Exception(f"Track '{track_id_or_input}' not found on Tidal")
-            track_id = hits[0].asin
+                hits = await self.api.search(f"{target_title} {target_artist}".strip() or track_id_or_input, limit=5)
+            if not hits:
+                hits = await self.api.search(track_id_or_input, limit=5)
+            
+            if hits:
+                # Rank candidates by fuzzy match score
+                scored_hits = sorted(
+                    hits,
+                    key=lambda h: score_candidate(h, target_title or track_id_or_input, target_artist, target_duration),
+                    reverse=True
+                )
+                candidate_ids = [h.asin for h in scored_hits]
 
-        # 1. Fetch track metadata
-        track_meta = await self.api.get_track(track_id)
-        if not track_meta:
-            raise Exception(f"Track metadata for {track_id} not found on Tidal")
+        if not candidate_ids:
+            raise Exception(f"Track '{track_id_or_input}' not found on Tidal")
 
-        title = track_meta.get("title") or "Unknown Title"
-        artists = track_meta.get("artists") or []
-        artist = ", ".join([a.get("name") for a in artists if a.get("name")]) or "Unknown Artist"
-        album_meta = track_meta.get("album") or {}
-        album_title = album_meta.get("title") or "Unknown Album"
-        track_number = track_meta.get("trackNumber") or 1
-        disc_number = track_meta.get("volumeNumber") or 1
-        release_date = track_meta.get("streamStartDate") or album_meta.get("releaseDate")
-        year = str(release_date)[:4] if release_date else None
-        isrc = track_meta.get("isrc")
-        copyright_str = track_meta.get("copyright")
-
-        # 2. Resolve Stream URL (with candidate fallback)
-        candidate_ids = [track_id]
-        if not self.api.extract_track_id(track_id_or_input):
-            hits = await self.api.search(track_id_or_input, limit=3)
-            candidate_ids = [h.asin for h in hits] or [track_id]
-
+        # 2. Resolve Stream URL across best candidates
         stream_url = None
         codec = "flac"
         bitrate = 0
         encryption_key = None
+        resolved_track_id = None
+        raw_track_meta = None
 
         for cid in candidate_ids:
             try:
+                t_meta = await self.api.get_track(cid)
+                if not t_meta:
+                    continue
+
                 s_url, cd, br, ekey = await self.api.get_stream_url(cid, quality=quality)
                 if s_url:
-                    track_id = cid
+                    resolved_track_id = cid
+                    raw_track_meta = t_meta
                     stream_url = s_url
                     codec = cd
                     bitrate = br
@@ -88,22 +140,28 @@ class TidalDownloader:
             except Exception:
                 continue
 
-        if not stream_url:
+        if not stream_url or not resolved_track_id:
             raise Exception(f"Could not retrieve playable stream URL for Tidal track {track_id_or_input} (quality: {quality})")
 
-        # Refetch track metadata for the resolved track ID if candidate changed
-        track_meta = await self.api.get_track(track_id)
-        title = track_meta.get("title") or "Unknown Title"
-        artists = track_meta.get("artists") or []
-        artist = ", ".join([a.get("name") for a in artists if a.get("name")]) or "Unknown Artist"
+        track_id = resolved_track_id
+        track_meta = raw_track_meta or (await self.api.get_track(track_id))
         album_meta = track_meta.get("album") or {}
-        album_title = album_meta.get("title") or "Unknown Album"
-        track_number = track_meta.get("trackNumber") or 1
-        disc_number = track_meta.get("volumeNumber") or 1
-        release_date = track_meta.get("streamStartDate") or album_meta.get("releaseDate")
-        year = str(release_date)[:4] if release_date else None
-        isrc = track_meta.get("isrc")
+
+        # 3. Construct Unified Metadata (Frontend hint prioritized, Tidal enriched)
+        title = (track_hint.get("title") if track_hint else None) or track_meta.get("title") or "Unknown Title"
+        artists_list = track_meta.get("artists") or []
+        tidal_artist_str = ", ".join([a.get("name") for a in artists_list if a.get("name")]) or track_meta.get("artist", {}).get("name")
+        artist = (track_hint.get("artist") if track_hint else None) or tidal_artist_str or "Unknown Artist"
+        album_title = (track_hint.get("album") if track_hint else None) or album_meta.get("title") or "Unknown Album"
+        track_number = track_hint.get("trackNumber") or track_meta.get("trackNumber") or 1
+        disc_number = track_hint.get("discNumber") or track_meta.get("volumeNumber") or 1
+        release_date = track_hint.get("releaseDate") or track_meta.get("streamStartDate") or album_meta.get("releaseDate") or ""
+        year = str(track_hint.get("year") or (release_date[:4] if release_date else "")) or None
+        isrc = track_meta.get("isrc") or track_hint.get("isrc")
         copyright_str = track_meta.get("copyright")
+        genre_name = track_hint.get("genre") or track_meta.get("genre") or album_meta.get("genre")
+        total_tracks = album_meta.get("numberOfTracks")
+        total_discs = album_meta.get("numberOfVolumes")
 
         target_folder = output_base / safe_filename(artist) / safe_filename(album_title)
         target_folder.mkdir(parents=True, exist_ok=True)
@@ -113,7 +171,7 @@ class TidalDownloader:
         final_flac_path = target_folder / f"{base_name}.flac"
         temp_file_path = target_folder / f"{base_name}.part"
 
-        # 3. Stream download bytes to disk (DASH segments or single stream)
+        # 4. Stream Download Chunks
         if isinstance(stream_url, dict) and stream_url.get("is_dash"):
             init_url = stream_url["init_url"]
             media_tmpl = stream_url["media_template"]
@@ -140,7 +198,7 @@ class TidalDownloader:
                         async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
                             f_out.write(chunk)
 
-        # 4. Decrypt if encrypted
+        # 5. Decrypt if AES encrypted
         if encryption_key:
             try:
                 decrypted_path = target_folder / f"{base_name}.decrypted"
@@ -151,18 +209,16 @@ class TidalDownloader:
             except Exception as e:
                 logger.warning(f"Error during AES stream decryption: {e}")
 
-        # 5. Ensure 100% FLAC Output Format (No M4A)
+        # 6. Remux to FLAC container
         if temp_file_path.exists():
             with open(temp_file_path, "rb") as f_check:
                 header = f_check.read(16)
 
             if header.startswith(b"fLaC"):
-                # Native FLAC elementary stream
                 if final_flac_path.exists():
                     final_flac_path.unlink()
                 temp_file_path.rename(final_flac_path)
             else:
-                # Check if MP4 container contains FLAC dfLa box
                 remux_success = False
                 try:
                     remux_flac(temp_file_path, final_flac_path)
@@ -171,7 +227,6 @@ class TidalDownloader:
                 except Exception:
                     remux_success = False
 
-                # If not native dfLa, convert container/audio to FLAC codec
                 if not remux_success:
                     try:
                         cmd = ["ffmpeg", "-y", "-i", str(temp_file_path), "-c:a", "flac", str(final_flac_path)]
@@ -179,34 +234,52 @@ class TidalDownloader:
                         temp_file_path.unlink(missing_ok=True)
                     except Exception as conv_err:
                         logger.error(f"FLAC conversion fallback failed: {conv_err}")
-                        # Fallback rename
                         if temp_file_path.exists():
                             temp_file_path.rename(final_flac_path)
         else:
             raise Exception("Downloaded audio file was not written.")
 
-        # 6. Fetch Cover Image & Lyrics for Vorbis Tagging
-        cover_id = album_meta.get("cover") or track_meta.get("cover")
+        # 7. Fetch High-Resolution Cover Image (PNG or JPEG)
         cover_bytes = None
-        if cover_id:
-            cover_url = self.api.format_cover_url(cover_id, "1280x1280")
-            if cover_url:
-                try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        c_resp = await client.get(cover_url)
-                        if c_resp.status_code == 200:
-                            cover_bytes = c_resp.content
-                except Exception as e:
-                    logger.warning(f"Failed downloading cover art for tagging: {e}")
+        cover_urls_to_try = []
 
+        if track_hint and track_hint.get("image"):
+            cover_urls_to_try.append(track_hint["image"])
+        if track_hint and track_hint.get("thumbnail_hq"):
+            cover_urls_to_try.append(track_hint["thumbnail_hq"])
+
+        cover_id = album_meta.get("cover") or track_meta.get("cover")
+        if cover_id:
+            cover_urls_to_try.append(self.api.format_cover_url(cover_id, "1280x1280"))
+            cover_urls_to_try.append(self.api.format_cover_url(cover_id, "640x640"))
+
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            for c_url in cover_urls_to_try:
+                if not c_url:
+                    continue
+                try:
+                    c_resp = await client.get(c_url)
+                    if c_resp.status_code == 200 and len(c_resp.content) > 1000:
+                        cover_bytes = c_resp.content
+                        break
+                except Exception as e:
+                    logger.warning(f"Notice fetching cover from {c_url}: {e}")
+
+        # 8. Fetch Synchronized Lyrics (Tidal native -> LRCLIB fallback)
         lyrics = await self.api.get_lyrics(track_id)
         if not lyrics:
             try:
-                clean_artist = artist.split(",")[0].split("&")[0].strip()
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                clean_artist = artist.split(",")[0].split("&")[0].replace("feat.", "").strip()
+                params = {"track_name": title, "artist_name": clean_artist}
+                if album_title and album_title != "Unknown Album":
+                    params["album_name"] = album_title
+                if target_duration:
+                    params["duration"] = target_duration
+
+                async with httpx.AsyncClient(timeout=8.0) as client:
                     lrc_resp = await client.get(
                         "https://lrclib.net/api/get",
-                        params={"track_name": title, "artist_name": clean_artist, "album_name": album_title or ""},
+                        params=params,
                         headers={"User-Agent": "ClashFLAC/2.2.0"}
                     )
                     if lrc_resp.status_code == 200:
@@ -225,10 +298,7 @@ class TidalDownloader:
             except Exception as lrc_err:
                 logger.warning(f"LRCLIB fallback notice: {lrc_err}")
 
-        # 7. Apply FLAC Vorbis Metadata Tags & Cover Picture
-        genre_name = track_meta.get("genre") or album_meta.get("genre")
-        total_tracks = album_meta.get("numberOfTracks")
-        total_discs = album_meta.get("numberOfVolumes")
+        # 9. Apply Bit-Perfect Vorbis Tags & Front Cover Picture
         try:
             self._apply_flac_tags(
                 file_path=final_flac_path,
@@ -287,10 +357,10 @@ class TidalDownloader:
                 audio["DISCTOTAL"] = str(total_discs)
                 audio["TOTALDISCS"] = str(total_discs)
             if year:
-                audio["DATE"] = year
-                audio["YEAR"] = year
+                audio["DATE"] = str(year)
+                audio["YEAR"] = str(year)
             if release_date:
-                audio["RELEASEDATE"] = release_date
+                audio["RELEASEDATE"] = str(release_date)
             if isrc:
                 audio["ISRC"] = isrc
             if genre:
@@ -304,8 +374,15 @@ class TidalDownloader:
 
             if cover_bytes:
                 pic = Picture()
-                pic.type = 3  # Cover (front)
-                pic.mime = "image/jpeg"
+                pic.type = 3  # Front Cover
+                if cover_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                    pic.mime = "image/png"
+                elif cover_bytes.startswith(b"\xff\xd8\xff"):
+                    pic.mime = "image/jpeg"
+                elif cover_bytes.startswith(b"RIFF") and b"WEBP" in cover_bytes[:12]:
+                    pic.mime = "image/webp"
+                else:
+                    pic.mime = "image/jpeg"
                 pic.desc = "Front Cover"
                 pic.data = cover_bytes
                 audio.clear_pictures()

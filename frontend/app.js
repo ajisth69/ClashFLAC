@@ -793,14 +793,42 @@ function versionsCompatible(catalogTitle, previewTitle) {
     return VERSION_MARKERS.every((marker) => hasVersionMarker(catalogTitle, marker) === hasVersionMarker(previewTitle, marker));
 }
 
+function isExactSpotifyMatch(base, spotify) {
+    if (!spotify || !base) return false;
+    const baseRaw = normalize(base.title || "");
+    const candRaw = normalize(spotify.title || "");
+    const baseClean = normalize(cleanTitle(base.title || ""));
+    const candClean = normalize(cleanTitle(spotify.title || ""));
+    const simClean = tokenSimilarity(baseClean, candClean);
+    const simRaw = tokenSimilarity(baseRaw, candRaw);
+    
+    // Strict title match (must have high token similarity or identical clean title)
+    const titleMatch = (baseClean && baseClean === candClean) || (baseRaw && baseRaw === candRaw) || simClean >= 0.85 || simRaw >= 0.85;
+    if (!titleMatch) return false;
+
+    // Strict artist match
+    const baseArtist = base.artist;
+    const candArtist = spotify.artist;
+    if (baseArtist && !artistsCompatible(baseArtist, candArtist)) return false;
+
+    // Strict duration match (within 8 seconds)
+    const baseDur = Number(base.duration || base.duration_sec || 0);
+    const candDur = Number(spotify.duration || spotify.duration_sec || 0);
+    if (baseDur && candDur && Math.abs(baseDur - candDur) > 8) return false;
+
+    return true;
+}
+
 function findCatalogPreview(item, spotifyItems, previewItems) {
     const rawArtist = item.artist && !normalize(item.artist).includes("unknown") ? item.artist : "";
-    const spotify = bestMatch(
+    const rawSpotify = bestMatch(
         { title: item.title, artist: rawArtist, album: item.album || "", duration: Number(item.duration_sec || 0) },
         spotifyItems,
         (entry) => entry.artist || "",
-        { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) },
+        { minScore: 16, requireArtist: Boolean(rawArtist) }
     );
+    const spotify = isExactSpotifyMatch(item, rawSpotify) ? rawSpotify : null;
+
     const artist = rawArtist || spotify?.artist || "Unknown artist";
     const base = {
         title: item.title || "Unknown title",
@@ -810,9 +838,9 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
     };
     const playableCandidates = previewItems.filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(base.title, candidate.name));
     return bestMatch(base, playableCandidates, previewArtists, {
-        minScore: 13,
+        minScore: 15,
         requireArtist: !normalize(artist).includes("unknown"),
-        durationTolerance: 20,
+        durationTolerance: 15,
     });
 }
 
@@ -825,20 +853,21 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
     amazonItems.forEach((amzItem, amzIdx) => {
         const rawArtist = amzItem.artist && !normalize(amzItem.artist).includes("unknown") ? amzItem.artist : "";
 
-        // Find matching Spotify metadata
-        const spotify = bestMatch(
+        // Find matching Spotify metadata (strictly verified)
+        const rawSpotify = bestMatch(
             { title: amzItem.title, artist: rawArtist, album: amzItem.album || "", duration: Number(amzItem.duration_sec || 0) },
             spotifyItems,
             (entry) => entry.artist || "",
-            { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) }
+            { minScore: 16, requireArtist: Boolean(rawArtist) }
         );
+        const spotify = isExactSpotifyMatch(amzItem, rawSpotify) ? rawSpotify : null;
 
         // Find matching Tidal track
         const matchedTidal = bestMatch(
             { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
             tidalItems.filter((t) => !matchedTidalAsins.has(String(t.asin))),
             (entry) => entry.artist || "",
-            { minScore: 11, requireArtist: Boolean(rawArtist) }
+            { minScore: 12, requireArtist: Boolean(rawArtist) }
         );
 
         if (matchedTidal) {
@@ -847,15 +876,22 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
         matchedAmazonAsins.add(String(amzItem.asin));
 
         // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
-        const preview = findCatalogPreview(amzItem, spotifyItems, previewItems);
+        const preview = findCatalogPreview(amzItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
         const streamUrl = jioUrl || spotify30s || "";
         const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
 
-        const artist = spotify?.artist || rawArtist || previewArtists(preview);
-        const title = spotify?.title || amzItem.title || "Unknown title";
-        const album = spotify?.album || amzItem.album || preview?.album?.name || "";
+        // Canonical native metadata preservation
+        const title = amzItem.title || spotify?.title || "Unknown title";
+        const artist = rawArtist || amzItem.artist || spotify?.artist || previewArtists(preview);
+        const album = amzItem.album || spotify?.album || preview?.album?.name || "";
+        const image = (amzItem.thumbnail_url ? upgradeThumbnail(amzItem.thumbnail_url) : "")
+            || (matchedTidal?.thumbnail_url ? upgradeThumbnail(matchedTidal.thumbnail_url) : "")
+            || (spotify?.thumbnail_hq ? upgradeThumbnail(spotify.thumbnail_hq) : "")
+            || getImage(preview, "500x500")
+            || spotify?.thumbnail_url
+            || getImage(preview);
 
         results.push({
             id: `song-${amzItem.asin || amzIdx}`,
@@ -865,10 +901,10 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             title: title,
             artist: artist,
             album: album,
-            year: spotify?.year || amzItem.year || matchedTidal?.year || preview?.year || "",
-            releaseDate: spotify?.release_date || amzItem.release_date || matchedTidal?.release_date || "",
-            duration: Number(spotify?.duration_sec || amzItem.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
-            image: spotify?.thumbnail_hq || (matchedTidal?.thumbnail_url) || (amzItem.thumbnail_url ? upgradeThumbnail(amzItem.thumbnail_url) : "") || getImage(preview, "500x500") || spotify?.thumbnail_url || getImage(preview),
+            year: amzItem.year || spotify?.year || matchedTidal?.year || preview?.year || "",
+            releaseDate: amzItem.release_date || spotify?.release_date || matchedTidal?.release_date || "",
+            duration: Number(amzItem.duration_sec || spotify?.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
+            image: image,
             amazonUrl: safeUrl(amzItem.url || amzItem.inputUrl || ""),
             tidalUrl: matchedTidal ? safeUrl(matchedTidal.url || `https://tidal.com/browse/track/${matchedTidal.asin}`) : "",
             spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
@@ -904,24 +940,31 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
 
         const rawArtist = tItem.artist && !normalize(tItem.artist).includes("unknown") ? tItem.artist : "";
 
-        // Find matching Spotify metadata
-        const spotify = bestMatch(
+        // Find matching Spotify metadata (strictly verified)
+        const rawSpotify = bestMatch(
             { title: tItem.title, artist: rawArtist, album: tItem.album || "", duration: Number(tItem.duration_sec || 0) },
             spotifyItems,
             (entry) => entry.artist || "",
-            { minScore: rawArtist ? 11 : 8, requireArtist: Boolean(rawArtist) }
+            { minScore: 16, requireArtist: Boolean(rawArtist) }
         );
+        const spotify = isExactSpotifyMatch(tItem, rawSpotify) ? rawSpotify : null;
 
         // Audio preview resolution: 1. JioSaavn full stream -> 2. Spotify/Studio 30s preview
-        const preview = findCatalogPreview(tItem, spotifyItems, previewItems);
+        const preview = findCatalogPreview(tItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
         const streamUrl = jioUrl || spotify30s || "";
         const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
 
-        const artist = spotify?.artist || rawArtist || previewArtists(preview);
-        const title = spotify?.title || tItem.title || "Unknown title";
-        const album = spotify?.album || tItem.album || preview?.album?.name || "";
+        // Canonical native metadata preservation
+        const title = tItem.title || spotify?.title || "Unknown title";
+        const artist = rawArtist || tItem.artist || spotify?.artist || previewArtists(preview);
+        const album = tItem.album || spotify?.album || preview?.album?.name || "";
+        const image = (tItem.thumbnail_url ? upgradeThumbnail(tItem.thumbnail_url) : "")
+            || (spotify?.thumbnail_hq ? upgradeThumbnail(spotify.thumbnail_hq) : "")
+            || getImage(preview, "500x500")
+            || spotify?.thumbnail_url
+            || getImage(preview);
 
         results.push({
             id: `song-tidal-${tItem.asin || tIdx}`,
@@ -931,10 +974,10 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             title: title,
             artist: artist,
             album: album,
-            year: spotify?.year || tItem.year || preview?.year || "",
-            releaseDate: spotify?.release_date || tItem.release_date || "",
-            duration: Number(spotify?.duration_sec || tItem.duration_sec || preview?.duration || 0),
-            image: spotify?.thumbnail_hq || tItem.thumbnail_url || getImage(preview, "500x500") || spotify?.thumbnail_url || getImage(preview),
+            year: tItem.year || spotify?.year || preview?.year || "",
+            releaseDate: tItem.release_date || spotify?.release_date || "",
+            duration: Number(tItem.duration_sec || spotify?.duration_sec || preview?.duration || 0),
+            image: image,
             amazonUrl: "",
             tidalUrl: safeUrl(tItem.url || tItem.inputUrl || `https://tidal.com/browse/track/${tItem.asin}`),
             spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
@@ -954,7 +997,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             discNumber: tItem.disc_number || "",
             explicit: Boolean(tItem.explicit || preview?.explicitContent),
             source: "spotify_unified",
-            downloadSource: "tidal", // Only Tidal is available for this song
+            downloadSource: "tidal",
             downloadInput: tItem.asin || tItem.url || tItem.title,
             hasAmazon: false,
             hasTidal: true,
