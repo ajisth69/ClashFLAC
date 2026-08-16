@@ -183,7 +183,7 @@ function initTurnstile() {
                     state.turnstileResolver = null;
                 }
             },
-            size: "invisible",
+            appearance: "interaction-only",
         });
     } catch (err) {
         console.warn("Turnstile init notice:", err);
@@ -197,8 +197,7 @@ window.onTurnstileLoaded = () => {
 
 async function getTurnstileToken() {
     if (state.turnstileToken) {
-        const t = state.turnstileToken;
-        return t;
+        return state.turnstileToken;
     }
     if (!window.turnstile) return "";
 
@@ -216,13 +215,13 @@ async function getTurnstileToken() {
         } catch (e) {
             console.warn("Turnstile execute:", e);
         }
-        // Instant fallback resolve after 1.2s so downloads never lag or fail
+        // Fast graceful fallback after 400ms so downloads never stall
         setTimeout(() => {
             if (state.turnstileResolver) {
                 state.turnstileResolver(state.turnstileToken || "");
                 state.turnstileResolver = null;
             }
-        }, 1200);
+        }, 400);
     });
 }
 
