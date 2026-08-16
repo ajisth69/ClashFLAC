@@ -235,21 +235,23 @@ class TidalDownloader:
                     final_flac_path.unlink()
                 temp_file_path.rename(final_flac_path)
             else:
-                remux_success = False
+                # Convert MP4/AAC/DASH container stream to genuine bit-perfect PCM FLAC using ffmpeg
+                converted = False
                 try:
-                    remux_flac(temp_file_path, final_flac_path)
-                    temp_file_path.unlink(missing_ok=True)
-                    remux_success = True
-                except Exception:
-                    remux_success = False
-
-                if not remux_success:
-                    try:
-                        cmd = ["ffmpeg", "-y", "-i", str(temp_file_path), "-c:a", "flac", str(final_flac_path)]
-                        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    cmd = ["ffmpeg", "-y", "-i", str(temp_file_path), "-c:a", "flac", str(final_flac_path)]
+                    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if final_flac_path.exists() and final_flac_path.stat().st_size > 1000:
+                        converted = True
                         temp_file_path.unlink(missing_ok=True)
-                    except Exception as conv_err:
-                        logger.error(f"FLAC conversion fallback failed: {conv_err}")
+                except Exception as ff_err:
+                    logger.warning(f"ffmpeg conversion error: {ff_err}")
+
+                if not converted:
+                    # Fallback to remux_flac if ffmpeg failed
+                    try:
+                        remux_flac(temp_file_path, final_flac_path)
+                        temp_file_path.unlink(missing_ok=True)
+                    except Exception:
                         if temp_file_path.exists():
                             temp_file_path.rename(final_flac_path)
         else:
