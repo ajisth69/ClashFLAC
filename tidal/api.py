@@ -212,12 +212,65 @@ class TidalAPI:
         track_id: str,
         quality: str = "HD"
     ) -> Tuple[Optional[str], str, int, Optional[str]]:
+        """Return the best stream compatible with the requested quality tier.
+
+        UHD uses the best available Hi-Res stream. HD probes Hi-Res first, then
+        chooses CD Lossless as the second tier when it exists.
         """
-        Resolve playable / downloadable stream URL from Tidal playback info or streamUrl.
+        requested = (quality or "HD").upper()
+        quality_ladders = {
+            "UHD": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+            "HI_RES": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+            "MASTER": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+            "HD": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+            "LOSSLESS": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+            "HIGH": ["HIGH", "LOW"],
+            "LOW": ["LOW"],
+        }
+        ladder = quality_ladders.get(requested, quality_ladders["HD"])
+
+        hi_res_fallback = None
+        for target_quality in ladder:
+            stream_url, codec, bitrate, encryption_key = await self._get_stream_url_for_quality(
+                track_id, target_quality
+            )
+            if not stream_url:
+                continue
+
+            # CD mode deliberately selects the second lossless tier. Still retain
+            # Hi-Res so a track with no CD stream can use its best available copy.
+            if requested in {"HD", "LOSSLESS"} and target_quality == "HI_RES_LOSSLESS":
+                hi_res_fallback = (stream_url, codec, bitrate, encryption_key)
+                continue
+
+            if requested in {"HD", "LOSSLESS"} and hi_res_fallback and target_quality != "LOSSLESS":
+                logger.info("Tidal track %s: CD lossless unavailable; using Hi-Res fallback", track_id)
+                return hi_res_fallback
+
+            if target_quality != ladder[0]:
+                logger.info(
+                    "Tidal track %s: requested %s unavailable; using %s fallback",
+                    track_id,
+                    requested,
+                    target_quality,
+                )
+            return stream_url, codec, bitrate, encryption_key
+
+        if hi_res_fallback:
+            logger.info("Tidal track %s: CD lossless unavailable; using Hi-Res fallback", track_id)
+            return hi_res_fallback
+
+        return None, "flac", 0, None
+
+    async def _get_stream_url_for_quality(
+        self,
+        track_id: str,
+        target_quality: str,
+    ) -> Tuple[Optional[str], str, int, Optional[str]]:
+        """
+        Resolve one exact Tidal quality tier from playback info or streamUrl.
         Returns: (stream_url, codec, bitrate, encryption_key)
         """
-        target_quality = TidalConfig.QUALITY_MAP.get(quality.upper(), "LOSSLESS")
-
         # 1. Strategy A: playbackinfopostpaywall (Main Tidal streaming endpoint)
         try:
             pb_info = await self._request(
