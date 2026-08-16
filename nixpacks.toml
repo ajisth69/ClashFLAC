@@ -1,2 +1,4 @@
+providers = ["python"]
+
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["python311", "ffmpeg"]

@@ -18,6 +18,7 @@ from amzdl.remux.remux import remux_flac
 logger = logging.getLogger("tidal.downloader")
 
 import shutil
+import importlib
 
 def get_ffmpeg_binary() -> str:
     """Resolve ffmpeg binary from system PATH, imageio-ffmpeg, or standard Linux paths."""
@@ -25,8 +26,8 @@ def get_ffmpeg_binary() -> str:
     if exe:
         return exe
     try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        mod = importlib.import_module("imageio_ffmpeg")
+        return getattr(mod, "get_ffmpeg_exe")()
     except Exception:
         pass
     for path in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/nix/var/nix/profiles/default/bin/ffmpeg"):
