@@ -10,7 +10,7 @@ const activeApi = isLocalDev
 const state = {
     apiBase: activeApi,
     quality: localStorage.getItem("clash-quality") || "UHD",
-    enginePriority: localStorage.getItem("clash-engine-priority") || "amazon",
+    enginePriority: localStorage.getItem("clash-engine-priority") || "tidal",
     embedArt: localStorage.getItem("clash-embed-art") !== "false",
     embedLyrics: localStorage.getItem("clash-embed-lyrics") !== "false",
     theme: localStorage.getItem("clash-theme") || "light",
@@ -936,8 +936,8 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             discNumber: amzItem.disc_number || matchedTidal?.disc_number || "",
             explicit: Boolean(amzItem.explicit || matchedTidal?.explicit || preview?.explicitContent),
             source: "spotify_unified",
-            downloadSource: (matchedTidal && state.enginePriority === "tidal") ? "tidal" : "amazon",
-            downloadInput: (matchedTidal && state.enginePriority === "tidal") ? (matchedTidal.asin || matchedTidal.url) : (amzItem.asin || amzItem.url || amzItem.title),
+            downloadSource: matchedTidal ? "tidal" : "amazon",
+            downloadInput: matchedTidal ? (matchedTidal.asin || matchedTidal.url) : (amzItem.asin || amzItem.url || amzItem.title),
             hasAmazon: true,
             hasTidal: Boolean(matchedTidal),
             hasBothSources: Boolean(matchedTidal),
@@ -1522,17 +1522,15 @@ async function startDownload(track) {
 
     try {
         const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal"));
-        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && track.amazonAsin) || (track.downloadSource === "amazon" && /^[A-Z0-9]{10}$/i.test(track.asin)));
+        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && /^[A-Z0-9]{10}$/i.test(track.amazonAsin)));
         
-        let downloaded = false;
-        if (hasTidal && (state.enginePriority === "tidal" || !hasAmazon)) {
+        // ALWAYS try Tidal first when available — it embeds full metadata + cover art
+        if (hasTidal) {
             try {
                 await downloadTidal(job);
-                downloaded = true;
             } catch (err) {
                 if (hasAmazon) {
                     await downloadAmazon(job);
-                    downloaded = true;
                 } else {
                     throw err;
                 }
@@ -1540,26 +1538,20 @@ async function startDownload(track) {
         } else if (hasAmazon) {
             try {
                 await downloadAmazon(job);
-                downloaded = true;
             } catch (err) {
-                if (hasTidal) {
+                // Last resort: try Tidal search by title+artist
+                try {
                     await downloadTidal(job);
-                    downloaded = true;
-                } else {
-                    throw err;
+                } catch {
+                    throw err; // throw original Amazon error
                 }
             }
-        } else if (hasTidal) {
-            await downloadTidal(job);
-            downloaded = true;
         } else {
-            // If neither ASIN is present, attempt Tidal lossless resolution by Title + Artist first
+            // No ASIN at all — try Tidal search by title+artist, fallback to preview
             try {
                 await downloadTidal(job);
-                downloaded = true;
             } catch {
                 await downloadPreview(job);
-                downloaded = true;
             }
         }
         job.status = "completed";
