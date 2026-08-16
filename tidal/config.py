@@ -40,13 +40,13 @@ class TidalConfig:
     # Token storage locations
     TOKEN_FILE = Path("config/tidal_tokens.json")
 
-    # Quality mapping
+    # Quality mapping (Tidal unified tier delivers genuine FLAC via HI_RES_LOSSLESS)
     QUALITY_MAP = {
         "LOW": "LOW",              # 96 kbps AAC
         "HIGH": "HIGH",            # 320 kbps AAC
-        "HD": "LOSSLESS",          # 16-bit 44.1kHz FLAC
-        "UHD": "HI_RES_LOSSLESS",  # 24-bit up to 192kHz FLAC / Master
-        "LOSSLESS": "LOSSLESS",
+        "HD": "HI_RES_LOSSLESS",   # 16-bit/24-bit bit-perfect FLAC
+        "UHD": "HI_RES_LOSSLESS",  # 24-bit Hi-Res FLAC / Master
+        "LOSSLESS": "HI_RES_LOSSLESS",
         "HI_RES": "HI_RES_LOSSLESS",
         "HI_RES_LOSSLESS": "HI_RES_LOSSLESS",
         "MASTER": "HI_RES_LOSSLESS",

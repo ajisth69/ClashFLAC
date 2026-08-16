@@ -253,12 +253,16 @@ class TidalDownloader:
             cover_urls_to_try.append(self.api.format_cover_url(cover_id, "1280x1280"))
             cover_urls_to_try.append(self.api.format_cover_url(cover_id, "640x640"))
 
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        img_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             for c_url in cover_urls_to_try:
                 if not c_url:
                     continue
                 try:
-                    c_resp = await client.get(c_url)
+                    c_resp = await client.get(c_url, headers=img_headers)
                     if c_resp.status_code == 200 and len(c_resp.content) > 1000:
                         cover_bytes = c_resp.content
                         break
@@ -318,7 +322,7 @@ class TidalDownloader:
                 total_discs=total_discs,
             )
         except Exception as e:
-            logger.warning(f"Failed applying Vorbis tags to {final_flac_path}: {e}")
+            logger.error(f"Failed applying Vorbis tags to {final_flac_path}: {e}")
 
         logger.info(f"Successfully processed & tagged Tidal FLAC track: {final_flac_path.name}")
         return final_flac_path
@@ -342,52 +346,61 @@ class TidalDownloader:
         total_discs: Optional[int] = None,
     ):
         """Apply comprehensive FLAC Vorbis comments and embedded Front Cover picture block."""
+        # 1. Strip any legacy/corrupted ID3 header if present
         try:
-            audio = FLAC(file_path)
-            audio["TITLE"] = title
-            audio["ARTIST"] = artist
-            audio["ALBUM"] = album
-            audio["ALBUMARTIST"] = artist
-            audio["TRACKNUMBER"] = str(track_number)
-            audio["DISCNUMBER"] = str(disc_number)
-            if total_tracks:
-                audio["TRACKTOTAL"] = str(total_tracks)
-                audio["TOTALTRACKS"] = str(total_tracks)
-            if total_discs:
-                audio["DISCTOTAL"] = str(total_discs)
-                audio["TOTALDISCS"] = str(total_discs)
-            if year:
-                audio["DATE"] = str(year)
-                audio["YEAR"] = str(year)
-            if release_date:
-                audio["RELEASEDATE"] = str(release_date)
-            if isrc:
-                audio["ISRC"] = isrc
-            if genre:
-                audio["GENRE"] = genre
-            if copyright_str:
-                audio["COPYRIGHT"] = copyright_str
-            if lyrics:
-                audio["LYRICS"] = lyrics
-                audio["UNSYNCEDLYRICS"] = lyrics
-            audio["COMMENT"] = "ClashFLAC Lossless Engine"
+            from mutagen.id3 import delete as delete_id3
+            delete_id3(str(file_path))
+        except Exception:
+            pass
 
-            if cover_bytes:
-                pic = Picture()
-                pic.type = 3  # Front Cover
-                if cover_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-                    pic.mime = "image/png"
-                elif cover_bytes.startswith(b"\xff\xd8\xff"):
-                    pic.mime = "image/jpeg"
-                elif cover_bytes.startswith(b"RIFF") and b"WEBP" in cover_bytes[:12]:
-                    pic.mime = "image/webp"
-                else:
-                    pic.mime = "image/jpeg"
-                pic.desc = "Front Cover"
-                pic.data = cover_bytes
-                audio.clear_pictures()
-                audio.add_picture(pic)
+        # 2. Open native FLAC and purge existing/ffmpeg container metadata
+        audio = FLAC(str(file_path))
+        audio.delete()
 
-            audio.save()
-        except Exception as e:
-            logger.warning(f"Error saving FLAC tags on {file_path}: {e}")
+        # 3. Write standardized Vorbis Comments
+        audio["TITLE"] = title
+        audio["ARTIST"] = artist
+        audio["ALBUM"] = album
+        audio["ALBUMARTIST"] = artist
+        audio["TRACKNUMBER"] = str(track_number)
+        audio["DISCNUMBER"] = str(disc_number)
+        if total_tracks:
+            audio["TRACKTOTAL"] = str(total_tracks)
+            audio["TOTALTRACKS"] = str(total_tracks)
+        if total_discs:
+            audio["DISCTOTAL"] = str(total_discs)
+            audio["TOTALDISCS"] = str(total_discs)
+        if year:
+            audio["DATE"] = str(year)
+            audio["YEAR"] = str(year)
+        if release_date:
+            audio["RELEASEDATE"] = str(release_date)
+        if isrc:
+            audio["ISRC"] = isrc
+        if genre:
+            audio["GENRE"] = genre
+        if copyright_str:
+            audio["COPYRIGHT"] = copyright_str
+        if lyrics:
+            audio["LYRICS"] = lyrics
+            audio["UNSYNCEDLYRICS"] = lyrics
+        audio["COMMENT"] = "ClashFLAC Lossless Engine"
+
+        # 4. Embed Front Cover picture block
+        if cover_bytes:
+            pic = Picture()
+            pic.type = 3  # Front Cover
+            if cover_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                pic.mime = "image/png"
+            elif cover_bytes.startswith(b"\xff\xd8\xff"):
+                pic.mime = "image/jpeg"
+            elif cover_bytes.startswith(b"RIFF") and b"WEBP" in cover_bytes[:12]:
+                pic.mime = "image/webp"
+            else:
+                pic.mime = "image/jpeg"
+            pic.desc = "Front Cover"
+            pic.data = cover_bytes
+            audio.clear_pictures()
+            audio.add_picture(pic)
+
+        audio.save()
