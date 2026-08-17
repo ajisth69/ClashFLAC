@@ -17,9 +17,17 @@
   <img src="https://img.shields.io/badge/License-MIT-blueviolet?style=for-the-badge" alt="License" />
 </p>
 
-[Live Web App](https://clashflac.pages.dev) &bull; [API Service](https://clashflac-production.up.railway.app) &bull; [Documentation](https://clashflac-production.up.railway.app/docs)
+[Documentation](documentation.md)
 
 </div>
+
+> [!WARNING]
+> ### ⚠️ Legal Disclaimer & Usage Notice
+> 
+> - **Experimental / Educational Purpose Only:** This project is developed strictly for educational, research, and personal experimental purposes.
+> - **No Hosted Content:** This software does not host, store, or distribute any copyrighted media or audio files. All operations rely on user-supplied accounts and third-party APIs.
+> - **Personal Use Only:** Kindly use this project for personal, non-commercial purposes only. Users are responsible for complying with the terms of service of third-party platforms.
+> - **No Affiliation:** This project is not affiliated with, endorsed by, or associated with Amazon Music, TIDAL, Spotify, or any of their parent corporations.
 
 ---
 
