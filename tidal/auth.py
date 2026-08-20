@@ -82,11 +82,48 @@ class TidalAuth:
         self.user_token_expiry = float(data.get("token_expiry") or data.get("expires_at") or (time.time() + data.get("expires_in", 86400)))
 
     def save_tokens(self, data: Dict[str, Any]):
-        """Persist tokens to config/tidal_tokens.json."""
+        """Persist tokens to config/tidal_tokens.json, tidal_tokens.json, and .env."""
         token_path = TidalConfig.TOKEN_FILE
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        
+        root_token = Path("tidal_tokens.json")
+        try:
+            root_token.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
         self._apply_token_dict(data)
+
+        # Update .env if present
+        env_path = Path(".env")
+        if env_path.exists():
+            try:
+                import re
+                env_text = env_path.read_text(encoding="utf-8")
+                b64_creds = self.get_credentials_base64() or ""
+                
+                def update_key(content, key, value):
+                    pattern = re.compile(rf'^{key}=.*$', re.MULTILINE)
+                    if pattern.search(content):
+                        return pattern.sub(f'{key}="{value}"', content)
+                    return content + f'\n{key}="{value}"'
+
+                if b64_creds:
+                    env_text = update_key(env_text, "TIDAL_CREDENTIALS_BASE64", b64_creds)
+                if self.user_access_token:
+                    env_text = update_key(env_text, "TIDAL_ACCESS_TOKEN", self.user_access_token)
+                if self.user_refresh_token:
+                    env_text = update_key(env_text, "TIDAL_REFRESH_TOKEN", self.user_refresh_token)
+                if self.user_id:
+                    env_text = update_key(env_text, "TIDAL_USER_ID", self.user_id)
+                if self.user_country_code:
+                    env_text = update_key(env_text, "TIDAL_COUNTRY_CODE", self.user_country_code)
+
+                env_path.write_text(env_text, encoding="utf-8")
+                logger.info("Updated .env with new Tidal credentials.")
+            except Exception as e:
+                logger.warning(f"Failed updating .env: {e}")
 
     def clear_tokens(self):
         """Clear user tokens from memory and disk."""
@@ -247,6 +284,9 @@ class TidalAuth:
                     "message": "Authorization successful! Tidal tokens saved.",
                     "user_id": self.user_id,
                     "country_code": self.country_code,
+                    "access_token": self.user_access_token,
+                    "refresh_token": self.user_refresh_token,
+                    "token_expiry": self.user_token_expiry,
                 }
             elif resp.status_code in (400, 401):
                 err = resp.json()

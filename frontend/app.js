@@ -1,11 +1,11 @@
 const isLocalDev = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-const DEFAULT_API_BASE = isLocalDev ? (window.location.port === "5173" ? "" : "http://127.0.0.1:8000") : "https://clashflac-production.up.railway.app";
+const DEFAULT_API_BASE = isLocalDev ? (window.location.port === "5173" ? "" : "http://127.0.0.1:8000") : "https://clashflac-production-2f48.up.railway.app";
 const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 
 const savedApi = localStorage.getItem("clash-api-base");
 const activeApi = isLocalDev
   ? DEFAULT_API_BASE
-  : ((!savedApi || savedApi.includes("clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
+  : ((!savedApi || savedApi.includes("clashflac-production.up.railway.app") || savedApi.includes("clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
 
 // Ensure stale engine-priority defaults to Tidal
 const savedPriority = localStorage.getItem("clash-engine-priority");
