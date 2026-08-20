@@ -7,9 +7,9 @@ const activeApi = isLocalDev
   ? DEFAULT_API_BASE
   : ((!savedApi || savedApi.includes("clashflac-production.up.railway.app") || savedApi.includes("clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
 
-// Ensure stale engine-priority defaults to Tidal
+// Engine Priority Hierarchy: 1) Qobuz, 2) Amazon, 3) Tidal
 const savedPriority = localStorage.getItem("clash-engine-priority");
-const activePriority = (savedPriority === "amazon" || !savedPriority) ? "tidal" : savedPriority;
+const activePriority = (savedPriority === "qobuz" || savedPriority === "tidal" || savedPriority === "amazon") ? savedPriority : "qobuz";
 
 const state = {
     apiBase: activeApi,
@@ -541,13 +541,17 @@ async function handleSearch(event) {
     try {
         let resolvedQuery = primaryQuery;
         let directAmazonTrack = null;
+        let directQobuzTrack = null;
         let directTidalTrack = null;
-        if (/^https?:\/\//i.test(primaryQuery) || primaryQuery.startsWith("tidal:") || primaryQuery.startsWith("spotify:")) {
+        if (/^https?:\/\//i.test(primaryQuery) || primaryQuery.startsWith("tidal:") || primaryQuery.startsWith("qobuz:") || primaryQuery.startsWith("spotify:")) {
             const resolved = await resolveLink(primaryQuery, state.searchController.signal);
             resolvedQuery = resolved.query;
             if (resolved.directSource === "amazon" && resolved.track) {
                 directAmazonTrack = resolved.track;
                 directAmazonTrack.inputUrl = primaryQuery;
+            } else if (resolved.directSource === "qobuz" && resolved.track) {
+                directQobuzTrack = resolved.track;
+                directQobuzTrack.inputUrl = primaryQuery;
             } else if (resolved.directSource === "tidal" && resolved.track) {
                 directTidalTrack = resolved.track;
                 directTidalTrack.inputUrl = primaryQuery;
@@ -558,31 +562,33 @@ async function handleSearch(event) {
         }
 
         const catalogQuery = [resolvedQuery, artist, album, year].filter(Boolean).join(" ").trim();
-        const [amazonResult, tidalResult, spotifyResult, previewResult] = await Promise.allSettled([
-            directAmazonTrack ? Promise.resolve([directAmazonTrack]) : (directTidalTrack ? Promise.resolve([]) : searchAmazon(catalogQuery, state.searchController.signal)),
-            directTidalTrack ? Promise.resolve([directTidalTrack]) : (directAmazonTrack ? Promise.resolve([]) : searchTidal(catalogQuery, state.searchController.signal)),
+        const [amazonResult, qobuzResult, tidalResult, spotifyResult, previewResult] = await Promise.allSettled([
+            directAmazonTrack ? Promise.resolve([directAmazonTrack]) : (directQobuzTrack || directTidalTrack ? Promise.resolve([]) : searchAmazon(catalogQuery, state.searchController.signal)),
+            directQobuzTrack ? Promise.resolve([directQobuzTrack]) : (directAmazonTrack || directTidalTrack ? Promise.resolve([]) : searchQobuz(catalogQuery, state.searchController.signal)),
+            directTidalTrack ? Promise.resolve([directTidalTrack]) : (directAmazonTrack || directQobuzTrack ? Promise.resolve([]) : searchTidal(catalogQuery, state.searchController.signal)),
             searchSpotify(catalogQuery, state.searchController.signal),
             searchPreviews(catalogQuery, state.searchController.signal),
         ]);
 
         if (state.searchController.signal.aborted) return;
         const amazon = amazonResult.status === "fulfilled" && Array.isArray(amazonResult.value) ? amazonResult.value : [];
+        const qobuz = qobuzResult.status === "fulfilled" && Array.isArray(qobuzResult.value) ? qobuzResult.value : [];
         const tidal = tidalResult.status === "fulfilled" && Array.isArray(tidalResult.value) ? tidalResult.value : [];
         const spotify = spotifyResult.status === "fulfilled" && Array.isArray(spotifyResult.value) ? spotifyResult.value : [];
         const initialPreviews = previewResult.status === "fulfilled" && Array.isArray(previewResult.value) ? previewResult.value : [];
-        const allCatalogItems = [...amazon, ...tidal];
+        const allCatalogItems = [...amazon, ...qobuz, ...tidal];
         const previews = allCatalogItems.length
             ? await findCatalogPreviewCandidates(allCatalogItems, initialPreviews, state.searchController.signal)
             : [];
         if (state.searchController.signal.aborted) return;
-        state.results = mergeSearchSources(amazon, tidal, spotify, previews);
+        state.results = mergeSearchSources(amazon, qobuz, tidal, spotify, previews);
 
         if (!state.results.length) {
-            const reasons = [amazonResult, tidalResult, previewResult]
+            const reasons = [amazonResult, qobuzResult, tidalResult, previewResult]
                 .filter((result) => result.status === "rejected")
                 .map((result) => result.reason?.message)
                 .filter(Boolean);
-            renderSearchError(reasons[0] || "No tracks matched those details across Amazon & Tidal.", false);
+            renderSearchError(reasons[0] || "No tracks matched those details across Amazon, Qobuz & Tidal.", false);
             return;
         }
 
@@ -610,7 +616,21 @@ async function resolveLink(value, signal) {
         }
     }
 
-    // 2. Tidal URL or URI
+    // 2. Qobuz URL or URI
+    if (/qobuz\.com\//i.test(value) || value.startsWith("qobuz:")) {
+        const trackIdMatch = value.match(/(?:track\/|trackId=|qobuz:track:)(\d+)/i);
+        if (trackIdMatch) {
+            const track = await requestJson(api("/api/qobuz/resolve"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ input: trackIdMatch[1], quality: state.quality }),
+                signal,
+            });
+            return { query: `${track.title} ${track.artist}`, track, directSource: "qobuz" };
+        }
+    }
+
+    // 3. Tidal URL or URI
     if (/tidal\.com\//i.test(value) || value.startsWith("tidal:")) {
         const trackIdMatch = value.match(/(?:track\/|trackId=|tidal:track:)(\d+)/i);
         if (trackIdMatch) {
@@ -624,13 +644,17 @@ async function resolveLink(value, signal) {
         }
     }
 
-    // 3. Fallback resolve endpoint
+    // 4. Fallback resolve endpoint
     const data = await requestJson(api(`/api/resolve?q=${encodeURIComponent(value)}`), { signal });
     return { query: data.resolved || value, track: null, directSource: null };
 }
 
 async function searchAmazon(query, signal) {
     return requestJson(api(`/api/search?q=${encodeURIComponent(query)}&limit=20`), { signal });
+}
+
+async function searchQobuz(query, signal) {
+    return requestJson(api(`/api/qobuz/search?q=${encodeURIComponent(query)}&limit=20`), { signal });
 }
 
 async function searchTidal(query, signal) {
@@ -656,14 +680,17 @@ async function findCatalogPreviewCandidates(catalogItems, initialCandidates, sig
     const searchQueries = new Set();
     catalogItems.forEach((item) => {
         const title = cleanTitle(item.title);
-        const primaryArtist = cleanArtistTokens(item.artist)[0] || "";
+        const tokens = cleanArtistTokens(item.artist);
+        const primaryArtist = tokens[0] || "";
+        const allArtists = tokens.slice(0, 2).join(" ");
         if (title) searchQueries.add(title);
         if (title && primaryArtist) searchQueries.add(`${title} ${primaryArtist}`);
+        if (title && allArtists && allArtists !== primaryArtist) searchQueries.add(`${title} ${allArtists}`);
         if (primaryArtist.length > 2) searchQueries.add(primaryArtist);
     });
 
     const searches = await Promise.allSettled(
-        [...searchQueries].slice(0, 20).map((query) => searchPreviews(query, signal))
+        [...searchQueries].slice(0, 25).map((query) => searchPreviews(query, signal))
     );
     if (signal.aborted) return [];
     const candidates = [...initialCandidates];
@@ -692,12 +719,10 @@ function cleanTitle(title) {
 
 function cleanArtistTokens(artistStr) {
     if (!artistStr) return [];
-    const norm = normalize(artistStr);
-    if (!norm || norm.includes("unknown")) return [];
-    return norm
-        .split(/(?:,|\s+(?:feat\.|ft\.|featuring|with|and|&|x|\/|\+)\s+)/i)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 1 && !["the", "and", "feat", "ft", "various"].includes(s));
+    return String(artistStr)
+        .split(/(?:,|\s*[\&\|\+\/\(\)\[\]]\s*|\s+(?:feat\.|ft\.|featuring|with|and|x)\s+)/i)
+        .map((s) => normalize(s))
+        .filter((s) => s.length > 1 && !["the", "and", "feat", "ft", "various", "unknown"].includes(s));
 }
 
 function tokenSimilarity(left, right) {
@@ -716,8 +741,8 @@ function artistsCompatible(left, right) {
     const tokensA = cleanArtistTokens(left);
     const tokensB = cleanArtistTokens(right);
     if (!tokensA.length || !tokensB.length) return false;
-    const overlap = tokensA.some((token) => tokensB.some((bToken) => bToken.includes(token) || token.includes(bToken)));
-    return overlap || tokenSimilarity(a, b) >= 0.45;
+    const overlap = tokensA.some((token) => tokensB.some((bToken) => bToken === token || bToken.includes(token) || token.includes(bToken)));
+    return overlap || tokenSimilarity(a, b) >= 0.40;
 }
 
 function matchScore(base, candidate, candidateArtist = "") {
@@ -840,12 +865,27 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
     );
 }
 
-function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems) {
+function mergeSearchSources(amazonItems, qobuzItems, tidalItems, spotifyItems, previewItems) {
+    const matchedQobuzAsins = new Set();
     const matchedTidalAsins = new Set();
     const matchedAmazonAsins = new Set();
     const results = [];
 
-    // 1. Process Amazon items as base, matching corresponding Tidal and Spotify items
+    // Helper: calculate download source based on engine priority (1: Qobuz, 2: Amazon, 3: Tidal)
+    function pickDownloadSource(hasAmz, hasQob, hasTid, amzVal, qobVal, tidVal) {
+        const pref = state.enginePriority || "qobuz";
+        if (pref === "qobuz" && hasQob) return { source: "qobuz", input: qobVal };
+        if (pref === "amazon" && hasAmz) return { source: "amazon", input: amzVal };
+        if (pref === "tidal" && hasTid) return { source: "tidal", input: tidVal };
+        
+        // Default Fallback cascade: Qobuz -> Amazon -> Tidal
+        if (hasQob) return { source: "qobuz", input: qobVal };
+        if (hasAmz) return { source: "amazon", input: amzVal };
+        if (hasTid) return { source: "tidal", input: tidVal };
+        return { source: "qobuz", input: qobVal || amzVal || tidVal };
+    }
+
+    // 1. Process Amazon items as base, matching corresponding Qobuz, Tidal, and Spotify items
     amazonItems.forEach((amzItem, amzIdx) => {
         const rawArtist = amzItem.artist && !normalize(amzItem.artist).includes("unknown") ? amzItem.artist : "";
 
@@ -858,50 +898,64 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
         );
         const spotify = isExactSpotifyMatch(amzItem, rawSpotify) ? rawSpotify : null;
 
-        // Find matching Tidal track
-        const matchedTidal = bestMatch(
+        // Find matching Qobuz track
+        const matchedQobuz = bestMatch(
             { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
-            tidalItems.filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (qobuzItems || []).filter((q) => !matchedQobuzAsins.has(String(q.asin))),
             (entry) => entry.artist || "",
             { minScore: 12, requireArtist: Boolean(rawArtist) }
         );
+        if (matchedQobuz) matchedQobuzAsins.add(String(matchedQobuz.asin));
 
-        if (matchedTidal) {
-            matchedTidalAsins.add(String(matchedTidal.asin));
-        }
+        // Find matching Tidal track
+        const matchedTidal = bestMatch(
+            { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
+            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (entry) => entry.artist || "",
+            { minScore: 12, requireArtist: Boolean(rawArtist) }
+        );
+        if (matchedTidal) matchedTidalAsins.add(String(matchedTidal.asin));
         matchedAmazonAsins.add(String(amzItem.asin));
 
-        // JioSaavn is playback-only; download routing below remains Amazon/Tidal only.
+        // Preview audio resolution: JioSaavn full stream -> Qobuz 320kbps MP3 stream -> Spotify 30s
         const preview = findCatalogPreview(amzItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
-        const streamUrl = jioUrl || spotify30s || "";
-        const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
+        const streamUrl = jioUrl || (matchedQobuz ? "qobuz://stream" : (spotify30s || ""));
+        const streamType = jioUrl ? "full" : (matchedQobuz ? "qobuz-hifi" : (spotify30s ? "spotify-30s" : "none"));
 
-        // Canonical native metadata preservation
+        // Canonical metadata
         const title = amzItem.title || spotify?.title || "Unknown title";
         const artist = rawArtist || amzItem.artist || spotify?.artist || previewArtists(preview);
         const album = amzItem.album || spotify?.album || preview?.album?.name || "";
         const image = (amzItem.thumbnail_url ? upgradeThumbnail(amzItem.thumbnail_url) : "")
+            || (matchedQobuz?.thumbnail_url ? upgradeThumbnail(matchedQobuz.thumbnail_url) : "")
             || (matchedTidal?.thumbnail_url ? upgradeThumbnail(matchedTidal.thumbnail_url) : "")
             || (spotify?.thumbnail_hq ? upgradeThumbnail(spotify.thumbnail_hq) : "")
             || getImage(preview, "500x500")
             || spotify?.thumbnail_url
             || getImage(preview);
 
+        const hasAmazon = true;
+        const hasQobuz = Boolean(matchedQobuz);
+        const hasTidal = Boolean(matchedTidal);
+        const dlChoice = pickDownloadSource(hasAmazon, hasQobuz, hasTidal, amzItem.asin || amzItem.url, matchedQobuz?.asin, matchedTidal?.asin);
+
         results.push({
             id: `song-${amzItem.asin || amzIdx}`,
             asin: amzItem.asin || "",
             amazonAsin: amzItem.asin || "",
+            qobuzAsin: matchedQobuz?.asin || "",
             tidalAsin: matchedTidal?.asin || "",
             title: title,
             artist: artist,
             album: album,
-            year: amzItem.year || spotify?.year || matchedTidal?.year || preview?.year || "",
-            releaseDate: amzItem.release_date || spotify?.release_date || matchedTidal?.release_date || "",
-            duration: Number(amzItem.duration_sec || spotify?.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
+            year: amzItem.year || spotify?.year || matchedQobuz?.year || matchedTidal?.year || preview?.year || "",
+            releaseDate: amzItem.release_date || spotify?.release_date || matchedQobuz?.release_date || matchedTidal?.release_date || "",
+            duration: Number(amzItem.duration_sec || spotify?.duration_sec || matchedQobuz?.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
             image: image,
             amazonUrl: safeUrl(amzItem.url || amzItem.inputUrl || ""),
+            qobuzUrl: matchedQobuz ? safeUrl(matchedQobuz.url || `https://open.qobuz.com/track/${matchedQobuz.asin}`) : "",
             tidalUrl: matchedTidal ? safeUrl(matchedTidal.url || `https://tidal.com/browse/track/${matchedTidal.asin}`) : "",
             spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
             previewPageUrl: safeUrl(preview?.url || ""),
@@ -915,28 +969,115 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             label: preview?.label || "",
             copyright: preview?.copyright || "",
             playCount: preview?.playCount || "",
-            genre: amzItem.genre || matchedTidal?.genre || "",
-            trackNumber: amzItem.track_number || matchedTidal?.track_number || "",
-            discNumber: amzItem.disc_number || matchedTidal?.disc_number || "",
-            explicit: Boolean(amzItem.explicit || matchedTidal?.explicit || preview?.explicitContent),
+            genre: amzItem.genre || matchedQobuz?.genre || matchedTidal?.genre || "",
+            trackNumber: amzItem.track_number || matchedQobuz?.track_number || matchedTidal?.track_number || "",
+            discNumber: amzItem.disc_number || matchedQobuz?.disc_number || matchedTidal?.disc_number || "",
+            explicit: Boolean(amzItem.explicit || matchedQobuz?.explicit || matchedTidal?.explicit || preview?.explicitContent),
             source: "spotify_unified",
-            downloadSource: matchedTidal ? "tidal" : "amazon",
-            downloadInput: matchedTidal ? (matchedTidal.asin || matchedTidal.url) : (amzItem.asin || amzItem.url || amzItem.title),
+            downloadSource: dlChoice.source,
+            downloadInput: dlChoice.input,
             hasAmazon: true,
-            hasTidal: Boolean(matchedTidal),
-            hasBothSources: Boolean(matchedTidal),
+            hasQobuz: hasQobuz,
+            hasTidal: hasTidal,
+            hasBothSources: (hasAmazon && (hasQobuz || hasTidal)) || (hasQobuz && hasTidal),
+            hasTripleSources: hasAmazon && hasQobuz && hasTidal,
             audioQuality: state.quality || "UHD",
             relevance: amzIdx,
         });
     });
 
-    // 2. Process Tidal-only items (Tracks present in Tidal only)
-    tidalItems.forEach((tItem, tIdx) => {
+    // 2. Process Qobuz-only items
+    (qobuzItems || []).forEach((qItem, qIdx) => {
+        if (matchedQobuzAsins.has(String(qItem.asin))) return;
+
+        const rawArtist = qItem.artist && !normalize(qItem.artist).includes("unknown") ? qItem.artist : "";
+        const rawSpotify = bestMatch(
+            { title: qItem.title, artist: rawArtist, album: qItem.album || "", duration: Number(qItem.duration_sec || 0) },
+            spotifyItems,
+            (entry) => entry.artist || "",
+            { minScore: 16, requireArtist: Boolean(rawArtist) }
+        );
+        const spotify = isExactSpotifyMatch(qItem, rawSpotify) ? rawSpotify : null;
+
+        const matchedTidal = bestMatch(
+            { title: qItem.title, artist: rawArtist || spotify?.artist || "", album: qItem.album || spotify?.album || "", duration: Number(qItem.duration_sec || 0) },
+            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (entry) => entry.artist || "",
+            { minScore: 12, requireArtist: Boolean(rawArtist) }
+        );
+        if (matchedTidal) matchedTidalAsins.add(String(matchedTidal.asin));
+        matchedQobuzAsins.add(String(qItem.asin));
+
+        const preview = findCatalogPreview(qItem, spotify ? [spotify] : [], previewItems);
+        const jioUrl = getPreviewUrl(preview);
+        const spotify30s = spotify?.preview_url;
+        const streamUrl = jioUrl || "qobuz://stream";
+        const streamType = jioUrl ? "full" : "qobuz-hifi";
+
+        const title = qItem.title || spotify?.title || "Unknown title";
+        const artist = rawArtist || qItem.artist || spotify?.artist || previewArtists(preview);
+        const album = qItem.album || spotify?.album || preview?.album?.name || "";
+        const image = (qItem.thumbnail_url ? upgradeThumbnail(qItem.thumbnail_url) : "")
+            || (matchedTidal?.thumbnail_url ? upgradeThumbnail(matchedTidal.thumbnail_url) : "")
+            || (spotify?.thumbnail_hq ? upgradeThumbnail(spotify.thumbnail_hq) : "")
+            || getImage(preview, "500x500")
+            || spotify?.thumbnail_url
+            || getImage(preview);
+
+        const hasQobuz = true;
+        const hasTidal = Boolean(matchedTidal);
+        const dlChoice = pickDownloadSource(false, hasQobuz, hasTidal, "", qItem.asin || qItem.url, matchedTidal?.asin);
+
+        results.push({
+            id: `song-qobuz-${qItem.asin || qIdx}`,
+            asin: qItem.asin || "",
+            amazonAsin: "",
+            qobuzAsin: qItem.asin || "",
+            tidalAsin: matchedTidal?.asin || "",
+            title: title,
+            artist: artist,
+            album: album,
+            year: qItem.year || spotify?.year || matchedTidal?.year || preview?.year || "",
+            releaseDate: qItem.release_date || spotify?.release_date || matchedTidal?.release_date || "",
+            duration: Number(qItem.duration_sec || spotify?.duration_sec || matchedTidal?.duration_sec || preview?.duration || 0),
+            image: image,
+            amazonUrl: "",
+            qobuzUrl: safeUrl(qItem.url || qItem.inputUrl || `https://open.qobuz.com/track/${qItem.asin}`),
+            tidalUrl: matchedTidal ? safeUrl(matchedTidal.url || `https://tidal.com/browse/track/${matchedTidal.asin}`) : "",
+            spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
+            previewPageUrl: safeUrl(preview?.url || ""),
+            streamUrl: streamUrl,
+            streamType: streamType,
+            previewId: preview?.id || "",
+            spotifyId: spotify?.spotify_id || "",
+            codec: "flac",
+            bitrate: 0,
+            language: preview?.language || "",
+            label: preview?.label || "",
+            copyright: preview?.copyright || "",
+            playCount: preview?.playCount || "",
+            genre: qItem.genre || matchedTidal?.genre || "",
+            trackNumber: qItem.track_number || matchedTidal?.track_number || "",
+            discNumber: qItem.disc_number || matchedTidal?.disc_number || "",
+            explicit: Boolean(qItem.explicit || matchedTidal?.explicit || preview?.explicitContent),
+            source: "spotify_unified",
+            downloadSource: dlChoice.source,
+            downloadInput: dlChoice.input,
+            hasAmazon: false,
+            hasQobuz: true,
+            hasTidal: hasTidal,
+            hasBothSources: hasTidal,
+            hasTripleSources: false,
+            audioQuality: qItem.audio_quality || "HI_RES",
+            relevance: amazonItems.length + qIdx,
+        });
+    });
+
+    // 3. Process Tidal-only items
+    (tidalItems || []).forEach((tItem, tIdx) => {
         if (matchedTidalAsins.has(String(tItem.asin))) return;
 
         const rawArtist = tItem.artist && !normalize(tItem.artist).includes("unknown") ? tItem.artist : "";
-
-        // Find matching Spotify metadata (strictly verified)
         const rawSpotify = bestMatch(
             { title: tItem.title, artist: rawArtist, album: tItem.album || "", duration: Number(tItem.duration_sec || 0) },
             spotifyItems,
@@ -945,14 +1086,12 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
         );
         const spotify = isExactSpotifyMatch(tItem, rawSpotify) ? rawSpotify : null;
 
-        // JioSaavn is playback-only; download routing below remains Amazon/Tidal only.
         const preview = findCatalogPreview(tItem, spotify ? [spotify] : [], previewItems);
         const jioUrl = getPreviewUrl(preview);
         const spotify30s = spotify?.preview_url;
         const streamUrl = jioUrl || spotify30s || "";
         const streamType = jioUrl ? "full" : (spotify30s ? "spotify-30s" : "none");
 
-        // Canonical native metadata preservation
         const title = tItem.title || spotify?.title || "Unknown title";
         const artist = rawArtist || tItem.artist || spotify?.artist || previewArtists(preview);
         const album = tItem.album || spotify?.album || preview?.album?.name || "";
@@ -966,6 +1105,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             id: `song-tidal-${tItem.asin || tIdx}`,
             asin: tItem.asin || "",
             amazonAsin: "",
+            qobuzAsin: "",
             tidalAsin: tItem.asin || "",
             title: title,
             artist: artist,
@@ -975,6 +1115,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             duration: Number(tItem.duration_sec || spotify?.duration_sec || preview?.duration || 0),
             image: image,
             amazonUrl: "",
+            qobuzUrl: "",
             tidalUrl: safeUrl(tItem.url || tItem.inputUrl || `https://tidal.com/browse/track/${tItem.asin}`),
             spotifyUrl: spotify?.spotify_id ? `https://open.spotify.com/track/${spotify.spotify_id}` : "",
             previewPageUrl: safeUrl(preview?.url || ""),
@@ -996,10 +1137,12 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
             downloadSource: "tidal",
             downloadInput: tItem.asin || tItem.url || tItem.title,
             hasAmazon: false,
+            hasQobuz: false,
             hasTidal: true,
             hasBothSources: false,
+            hasTripleSources: false,
             audioQuality: tItem.audio_quality || "HI_RES",
-            relevance: amazonItems.length + tIdx,
+            relevance: amazonItems.length + (qobuzItems || []).length + tIdx,
         });
     });
 
@@ -1008,7 +1151,7 @@ function mergeSearchSources(amazonItems, tidalItems, spotifyItems, previewItems)
 
 function setSearchLoading() {
     dom.resultsTitle.textContent = "Searching catalog & metadata…";
-    dom.resultsSummary.textContent = "Matching Spotify metadata with Amazon & Tidal lossless sources.";
+    dom.resultsSummary.textContent = "Matching Spotify metadata with Qobuz, Amazon & Tidal lossless sources.";
     dom.searchResults.innerHTML = `<div class="loading-list">${Array.from({ length: 6 }, () => '<div class="skeleton-row"></div>').join("")}</div>`;
 }
 
@@ -1030,7 +1173,7 @@ function applyFilters() {
         if (duration === "medium" && (track.duration < 180 || track.duration > 300)) return false;
         if (duration === "long" && track.duration <= 300) return false;
         if (availability === "playable" && !track.streamUrl) return false;
-        if (availability === "lossless" && !track.hasAmazon && !track.hasTidal) return false;
+        if (availability === "lossless" && !track.hasAmazon && !track.hasQobuz && !track.hasTidal) return false;
         return true;
     });
 
@@ -1048,14 +1191,14 @@ function applyFilters() {
 function renderResults() {
     const count = state.filteredResults.length;
     const playableCount = state.filteredResults.filter((track) => track.streamUrl).length;
-    const bothCount = state.filteredResults.filter((track) => track.hasBothSources).length;
-    const amzOnlyCount = state.filteredResults.filter((track) => track.hasAmazon && !track.hasTidal).length;
-    const tidalOnlyCount = state.filteredResults.filter((track) => track.hasTidal && !track.hasAmazon).length;
+    const amzCount = state.filteredResults.filter((track) => track.hasAmazon).length;
+    const qobuzCount = state.filteredResults.filter((track) => track.hasQobuz).length;
+    const tidalCount = state.filteredResults.filter((track) => track.hasTidal).length;
     
     let summaryParts = [`${playableCount} playable`];
-    if (bothCount) summaryParts.push(`${bothCount} Amazon & Tidal`);
-    if (amzOnlyCount) summaryParts.push(`${amzOnlyCount} Amazon only`);
-    if (tidalOnlyCount) summaryParts.push(`${tidalOnlyCount} Tidal only`);
+    if (amzCount) summaryParts.push(`${amzCount} Amazon`);
+    if (qobuzCount) summaryParts.push(`${qobuzCount} Qobuz`);
+    if (tidalCount) summaryParts.push(`${tidalCount} Tidal`);
     summaryParts.push("Spotify metadata");
 
     dom.resultsTitle.textContent = count ? `${count} unified track${count === 1 ? "" : "s"}` : "No matching tracks";
@@ -1073,10 +1216,18 @@ function renderResults() {
         const unavailable = playable ? "" : " preview-unavailable";
 
         let sourceBadge = '<span class="badge">Direct audio</span>';
-        if (track.hasBothSources) {
-            sourceBadge = '<span class="badge lossless" title="Available in Ultra HD on Amazon & Tidal">Amazon & Tidal FLAC</span>';
+        if (track.hasTripleSources) {
+            sourceBadge = '<span class="badge lossless" title="Available in Ultra HD on Amazon, Qobuz & Tidal">Triple Lossless FLAC</span>';
+        } else if (track.hasAmazon && track.hasQobuz) {
+            sourceBadge = '<span class="badge lossless" title="Available on Amazon & Qobuz">Amazon & Qobuz FLAC</span>';
+        } else if (track.hasAmazon && track.hasTidal) {
+            sourceBadge = '<span class="badge lossless" title="Available on Amazon & Tidal">Amazon & Tidal FLAC</span>';
+        } else if (track.hasQobuz && track.hasTidal) {
+            sourceBadge = '<span class="badge lossless qobuz-badge" title="Available on Qobuz & Tidal">Qobuz & Tidal FLAC</span>';
         } else if (track.hasAmazon) {
             sourceBadge = '<span class="badge lossless" title="Available in Ultra HD on Amazon Music">Amazon FLAC</span>';
+        } else if (track.hasQobuz) {
+            sourceBadge = '<span class="badge lossless qobuz-badge" title="Available in Hi-Res on Qobuz">Qobuz FLAC</span>';
         } else if (track.hasTidal) {
             sourceBadge = '<span class="badge lossless tidal-badge" title="Available in Hi-Res on Tidal">Tidal FLAC</span>';
         }
@@ -1084,13 +1235,21 @@ function renderResults() {
         let previewBadge = '<span class="badge unavailable">No preview</span>';
         if (track.streamType === "full") {
             previewBadge = '<span class="badge preview">Hi-Fi Stream</span>';
+        } else if (track.streamType === "qobuz-hifi") {
+            previewBadge = '<span class="badge preview qobuz-badge">Qobuz Hi-Fi (320k)</span>';
         } else if (track.streamType === "spotify-30s") {
             previewBadge = '<span class="badge preview">30s Preview</span>';
         }
 
-        let catalogLabel = track.hasBothSources
-            ? "Spotify metadata · Amazon + Tidal FLAC"
-            : (track.hasAmazon ? "Spotify metadata · Amazon FLAC" : (track.hasTidal ? "Spotify metadata · Tidal FLAC" : "Spotify metadata"));
+        let catalogLabel = track.hasTripleSources
+            ? "Spotify metadata · Amazon + Qobuz + Tidal FLAC"
+            : (track.hasAmazon && track.hasQobuz
+                ? "Spotify metadata · Amazon + Qobuz FLAC"
+                : (track.hasAmazon && track.hasTidal
+                    ? "Spotify metadata · Amazon + Tidal FLAC"
+                    : (track.hasQobuz && track.hasTidal
+                        ? "Spotify metadata · Qobuz + Tidal FLAC"
+                        : (track.hasAmazon ? "Spotify metadata · Amazon FLAC" : (track.hasQobuz ? "Spotify metadata · Qobuz FLAC" : "Spotify metadata · Tidal FLAC")))));
 
         return `<article class="result-card${selected}${playing}${unavailable}" data-track-id="${escapeHtml(track.id)}" tabindex="0">
             <div class="result-art">
@@ -1159,21 +1318,34 @@ function renderInspector() {
     const playable = Boolean(track.streamUrl);
 
     let losslessBadge = `<span class="badge">${escapeHtml(track.codec || "AAC")}</span>`;
-    if (track.hasBothSources) {
-        losslessBadge = '<span class="badge lossless">Amazon & Tidal FLAC</span>';
+    if (track.hasTripleSources) {
+        losslessBadge = '<span class="badge lossless">Triple Lossless (Amazon · Qobuz · Tidal)</span>';
+    } else if (track.hasAmazon && track.hasQobuz) {
+        losslessBadge = '<span class="badge lossless">Amazon & Qobuz 24-bit FLAC</span>';
+    } else if (track.hasAmazon && track.hasTidal) {
+        losslessBadge = '<span class="badge lossless">Amazon & Tidal 24-bit FLAC</span>';
+    } else if (track.hasQobuz && track.hasTidal) {
+        losslessBadge = '<span class="badge lossless qobuz-badge">Qobuz & Tidal Hi-Res FLAC</span>';
     } else if (track.hasAmazon) {
         losslessBadge = '<span class="badge lossless">Amazon 24-bit FLAC</span>';
+    } else if (track.hasQobuz) {
+        losslessBadge = '<span class="badge lossless qobuz-badge">Qobuz Hi-Res 24-bit FLAC</span>';
     } else if (track.hasTidal) {
         losslessBadge = '<span class="badge lossless tidal-badge">Tidal Hi-Res FLAC</span>';
     }
 
     let sourceFact = "Spotify Metadata";
-    if (track.hasBothSources) sourceFact = "Amazon Music (UHD) + Tidal (HiFi)";
+    if (track.hasTripleSources) sourceFact = "Amazon UHD + Qobuz Hi-Res + Tidal Master";
+    else if (track.hasAmazon && track.hasQobuz) sourceFact = "Amazon UHD + Qobuz Hi-Res";
+    else if (track.hasAmazon && track.hasTidal) sourceFact = "Amazon UHD + Tidal Master";
+    else if (track.hasQobuz && track.hasTidal) sourceFact = "Qobuz Hi-Res + Tidal Master";
     else if (track.hasAmazon) sourceFact = "Amazon Music (Ultra HD)";
+    else if (track.hasQobuz) sourceFact = "Qobuz (Hi-Res Lossless)";
     else if (track.hasTidal) sourceFact = "Tidal Music (Hi-Res)";
 
     let previewFact = "No Browser Preview";
     if (track.streamType === "full") previewFact = "Hi-Fi Full Audio (320 kbps)";
+    else if (track.streamType === "qobuz-hifi") previewFact = "Qobuz Hi-Fi Audio (320 kbps MP3)";
     else if (track.streamType === "spotify-30s") previewFact = "Spotify 30-Sec Preview";
 
     const facts = [
@@ -1185,9 +1357,18 @@ function renderInspector() {
         ["Track", track.trackNumber ? `${track.trackNumber}${track.discNumber ? ` · Disc ${track.discNumber}` : ""}` : ""],
     ].filter(([, value]) => value && value !== "—" && value !== "Unknown");
 
-    const tidalAltBtn = (track.hasBothSources && track.tidalAsin)
-        ? `<button class="secondary-button" type="button" data-inspector-action="download-tidal" title="Download via Tidal">${icon("download")} Download Tidal FLAC</button>`
-        : "";
+    const altButtons = [];
+    if (track.hasQobuz && track.qobuzAsin) {
+        altButtons.push(`<button class="secondary-button" type="button" data-inspector-action="download-qobuz" title="Download via Qobuz">${icon("download")} Qobuz FLAC</button>`);
+    }
+    if (track.hasTidal && track.tidalAsin) {
+        altButtons.push(`<button class="secondary-button" type="button" data-inspector-action="download-tidal" title="Download via Tidal">${icon("download")} Tidal FLAC</button>`);
+    }
+    if (track.hasAmazon && (track.amazonAsin || track.hasBothSources)) {
+        altButtons.push(`<button class="secondary-button" type="button" data-inspector-action="download-amazon" title="Download via Amazon">${icon("download")} Amazon FLAC</button>`);
+    }
+
+    const altButtonsHtml = altButtons.join("");
 
     dom.inspector.className = "inspector-content";
     dom.inspector.innerHTML = `
@@ -1201,7 +1382,7 @@ function renderInspector() {
             ${track.explicit ? '<span class="badge unavailable">Explicit</span>' : ""}
         </div>
         ${facts.length ? `<div class="track-facts">${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join("")}</div>` : ""}
-        ${playable ? `<div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="play">${icon("play")} Play preview</button><button class="secondary-button" type="button" data-inspector-action="download" aria-label="Download">${icon("download")} Download FLAC</button>${tidalAltBtn}</div>` : `<div class="no-preview-note">${icon("alert")} No verified browser preview. Playback and queue controls are hidden.</div><div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="download">${icon("download")} Download FLAC</button>${tidalAltBtn}</div>`}`;
+        ${playable ? `<div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="play">${icon("play")} Play preview</button><button class="secondary-button" type="button" data-inspector-action="download" aria-label="Download">${icon("download")} Download FLAC</button>${altButtonsHtml}</div>` : `<div class="no-preview-note">${icon("alert")} No verified browser preview. Playback and queue controls are hidden.</div><div class="inspector-actions"><button class="primary-button" type="button" data-inspector-action="download">${icon("download")} Download FLAC</button>${altButtonsHtml}</div>`}`;
     dom.inspector.querySelector("img")?.addEventListener("error", (event) => event.target.remove(), { once: true });
 }
 
@@ -1210,6 +1391,22 @@ function handleInspectorAction(event) {
     if (!action || !state.selectedTrack) return;
     if (action === "play" && state.selectedTrack.streamUrl) playTrack(state.selectedTrack, { setContext: true });
     if (action === "download") startDownload(state.selectedTrack);
+    if (action === "download-amazon") {
+        const amzTrackCopy = {
+            ...state.selectedTrack,
+            downloadSource: "amazon",
+            downloadInput: state.selectedTrack.amazonAsin || state.selectedTrack.asin || state.selectedTrack.downloadInput
+        };
+        startDownload(amzTrackCopy);
+    }
+    if (action === "download-qobuz") {
+        const qobuzTrackCopy = {
+            ...state.selectedTrack,
+            downloadSource: "qobuz",
+            downloadInput: state.selectedTrack.qobuzAsin || state.selectedTrack.downloadInput
+        };
+        startDownload(qobuzTrackCopy);
+    }
     if (action === "download-tidal") {
         const tidalTrackCopy = {
             ...state.selectedTrack,
@@ -1220,8 +1417,27 @@ function handleInspectorAction(event) {
     }
 }
 
-async function resolvePreview(track) {
-    if (!track.streamUrl) throw new Error("No verified browser preview is available for this track.");
+async function resolvePreview(track, signal) {
+    if (track.streamUrl && track.streamUrl.startsWith("http")) return track.streamUrl;
+    
+    // Resolve on-demand dynamic stream URL from Qobuz
+    const qId = track.qobuzAsin || (track.downloadSource === "qobuz" ? (track.asin || track.id) : null);
+    if (qId || track.streamType === "qobuz-hifi" || track.hasQobuz) {
+        const targetId = qId || track.asin;
+        if (targetId) {
+            try {
+                const res = await requestJson(api(`/api/qobuz/stream/${encodeURIComponent(targetId)}`), { signal });
+                if (res?.stream_url) {
+                    track.streamUrl = res.stream_url;
+                    track.streamType = "qobuz-hifi";
+                    return res.stream_url;
+                }
+            } catch (err) {
+                console.warn("Qobuz stream resolution notice:", err);
+            }
+        }
+    }
+    if (!track.streamUrl || track.streamUrl.includes("://stream")) throw new Error("No verified browser preview is available for this track.");
     return track.streamUrl;
 }
 
@@ -1506,32 +1722,70 @@ async function startDownload(track) {
     watchDownloadProgress(job);
 
     try {
-        const hasTidal = Boolean(track.tidalAsin || track.hasTidal || (track.downloadSource === "tidal") || (track.asin && /^\d+$/.test(track.asin)));
-        const hasAmazon = Boolean(track.amazonAsin || (track.hasAmazon && /^[A-Z0-9]{10}$/i.test(track.amazonAsin)) || (track.asin && /^[A-Z0-9]{10}$/i.test(track.asin)));
-        
-        // Strict Lossless Engine: ONLY Tidal FLAC or Amazon FLAC (JioSaavn preview is NEVER downloaded)
-        if (hasTidal) {
+        // Engine priority hierarchy: 1) Qobuz, 2) Amazon, 3) Tidal (or user's configured preference)
+        const priorityOrder = state.enginePriority === "amazon"
+            ? ["amazon", "qobuz", "tidal"]
+            : (state.enginePriority === "tidal" ? ["tidal", "qobuz", "amazon"] : ["qobuz", "amazon", "tidal"]);
+
+        let success = false;
+        let lastError = null;
+
+        // If track specifically has a chosen downloadSource (e.g. user clicked inspector button)
+        if (track.downloadSource && ["qobuz", "amazon", "tidal"].includes(track.downloadSource)) {
             try {
-                await downloadTidal(job);
+                if (track.downloadSource === "qobuz") await downloadQobuz(job);
+                else if (track.downloadSource === "amazon") await downloadAmazon(job);
+                else if (track.downloadSource === "tidal") await downloadTidal(job);
+                success = true;
             } catch (err) {
-                // If Tidal download fails, attempt Amazon Music Lossless fallback
-                await downloadAmazon(job);
-            }
-        } else if (hasAmazon) {
-            try {
-                await downloadAmazon(job);
-            } catch (err) {
-                // If Amazon download fails, attempt Tidal Lossless fallback
-                await downloadTidal(job);
-            }
-        } else {
-            // Default: query Tidal Lossless engine first, then Amazon Lossless engine
-            try {
-                await downloadTidal(job);
-            } catch (err) {
-                await downloadAmazon(job);
+                lastError = err;
+                console.warn(`Direct downloadSource (${track.downloadSource}) failed:`, err);
             }
         }
+
+        // Try candidate engines in priority order
+        if (!success) {
+            for (const engine of priorityOrder) {
+                try {
+                    if (engine === "qobuz" && (track.hasQobuz || track.qobuzAsin)) {
+                        await downloadQobuz(job);
+                        success = true;
+                        break;
+                    } else if (engine === "amazon" && (track.hasAmazon || track.amazonAsin)) {
+                        await downloadAmazon(job);
+                        success = true;
+                        break;
+                    } else if (engine === "tidal" && (track.hasTidal || track.tidalAsin)) {
+                        await downloadTidal(job);
+                        success = true;
+                        break;
+                    }
+                } catch (err) {
+                    lastError = err;
+                    console.warn(`Engine ${engine} failed:`, err);
+                }
+            }
+        }
+
+        // Broad fallback: try all engines in default priority order
+        if (!success) {
+            for (const engine of ["qobuz", "amazon", "tidal"]) {
+                try {
+                    if (engine === "qobuz") await downloadQobuz(job);
+                    else if (engine === "amazon") await downloadAmazon(job);
+                    else if (engine === "tidal") await downloadTidal(job);
+                    success = true;
+                    break;
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+        }
+
+        if (!success) {
+            throw lastError || new Error("All lossless engines (Amazon, Qobuz, Tidal) failed for this track.");
+        }
+
         job.status = "completed";
         job.progress = 100;
         job.message = "Lossless copy ready";
@@ -1616,6 +1870,57 @@ async function downloadAmazon(job) {
         saveBlob(blob, filename);
     } else {
         let errorMsg = "Server did not return an audio stream.";
+        try {
+            const result = await response.json();
+            errorMsg = result.detail || result.message || errorMsg;
+        } catch { /* ignore */ }
+        throw new Error(errorMsg);
+    }
+}
+
+async function downloadQobuz(job) {
+    job.status = "downloading";
+    job.message = "Resolving and downloading Qobuz Hi-Res FLAC";
+    renderDownloads();
+    const token = await getTurnstileToken();
+    const dlUrl = api("/api/qobuz/download");
+    const headers = { "Content-Type": "application/json" };
+    headers["X-Download-Job-ID"] = job.id;
+    if (token) headers["X-Turnstile-Token"] = token;
+
+    const qobuzTarget = job.track.qobuzAsin
+        || (job.track.downloadSource === "qobuz" ? (job.track.asin || job.track.id) : null)
+        || (job.track.asin && /^\d+$/.test(job.track.asin) ? job.track.asin : null)
+        || `${job.track.title} ${job.track.artist}`.trim();
+
+    const response = await fetch(dlUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+            input: qobuzTarget,
+            track: job.track,
+            quality: "UHD"
+        }),
+        signal: job.controller.signal,
+    });
+    resetTurnstile();
+    if (!response.ok) {
+        let message = `Qobuz download failed (${response.status})`;
+        try { message = (await response.json()).detail || message; } catch { /* Use fallback. */ }
+        throw new Error(message);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("audio") || contentType.includes("application/octet-stream")) {
+        const blob = await response.blob();
+        const disposition = response.headers.get("content-disposition") || "";
+        const encoded = disposition.match(/filename\*=utf-8''([^;]+)/i)?.[1];
+        const rawPlain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        const plain = rawPlain ? decodeURIComponent(rawPlain) : null;
+        const filename = encoded ? decodeURIComponent(encoded) : (plain || `${fileSafe(job.track.title)}.flac`);
+        saveBlob(blob, filename);
+    } else {
+        let errorMsg = "Server did not return a Qobuz audio stream.";
         try {
             const result = await response.json();
             errorMsg = result.detail || result.message || errorMsg;
@@ -1802,9 +2107,15 @@ async function checkConnection() {
 
 function openSettings() {
     const quality = state.quality || "UHD";
+    const engine = state.enginePriority || "amazon";
     if (dom.qualitySetting) dom.qualitySetting.value = quality;
     document.querySelectorAll(".quality-card").forEach((card) => {
         card.classList.toggle("active", card.dataset.value === quality);
+    });
+    const engineInput = document.getElementById("engine-setting");
+    if (engineInput) engineInput.value = engine;
+    document.querySelectorAll(".engine-card").forEach((card) => {
+        card.classList.toggle("active", card.dataset.engine === engine);
     });
     dom.settingsDialog.showModal();
 }
@@ -1815,9 +2126,16 @@ function saveSettings(event) {
         state.quality = dom.qualitySetting.value === "HD" ? "HD" : "UHD";
         localStorage.setItem("clash-quality", state.quality);
     }
+    const engineInput = document.getElementById("engine-setting");
+    if (engineInput) {
+        const val = engineInput.value;
+        state.enginePriority = ["amazon", "qobuz", "tidal"].includes(val) ? val : "amazon";
+        localStorage.setItem("clash-engine-priority", state.enginePriority);
+    }
     dom.settingsDialog.close();
     const qualityLabel = state.quality === "HD" ? "CD Lossless (16-bit / 44.1 kHz)" : "Ultra HD Master (24-bit / 192 kHz)";
-    showToast("Settings saved", `Quality: ${qualityLabel}`);
+    const engineLabel = state.enginePriority === "qobuz" ? "Qobuz Hi-Res" : (state.enginePriority === "tidal" ? "Tidal Lossless" : "Amazon Music HD");
+    showToast("Settings saved", `Engine: ${engineLabel} · Quality: ${qualityLabel}`);
 }
 
 function openPlayerSheet() {

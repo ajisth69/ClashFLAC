@@ -393,10 +393,10 @@ html[data-theme="dark"] .results-toolbar p { color: #fff8df; text-shadow: 2px 2p
 .result-main strong, .result-album strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-main strong { font-size: 14px; font-weight: 700; }
 .result-main > span, .result-album > span { display: block; margin-top: 4px; overflow: hidden; color: var(--text-soft); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.result-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .badge { display: inline-flex; align-items: center; min-height: 19px; padding: 0 6px; color: var(--outline); background: var(--surface-2); border: 2px solid var(--outline); border-radius: 5px; font: 700 7px "DM Mono", monospace; text-transform: uppercase; }
 .badge.lossless { background: var(--green); }
 .badge.tidal-badge { background: var(--blue); }
+.badge.qobuz-badge { background: var(--purple); color: #fff; }
 .badge.preview { background: var(--cyan); }
 .badge.unavailable { background: var(--pink-soft); }
 .result-album strong { color: var(--text); font-size: 11px; }

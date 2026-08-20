@@ -14,7 +14,9 @@ downloads/
 output/
 temp-dl/
 tidal_tokens.json
-tokens.json
+qobuz_tokens.json
+*tokens.json
+scratch/
 
 # Node & Frontend
 node_modules/

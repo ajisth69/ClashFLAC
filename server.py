@@ -58,6 +58,16 @@ if tidal_creds_b64:
         except Exception as e:
             pass
 
+# Restore Qobuz credentials from QOBUZ_CREDENTIALS_BASE64 if running on cloud/Railway
+qobuz_creds_b64 = (os.getenv("QOBUZ_CREDENTIALS_BASE64") or "").strip()
+if qobuz_creds_b64:
+    for target in [Path("config/qobuz_tokens.json"), Path("qobuz_tokens.json")]:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(base64.b64decode(qobuz_creds_b64))
+        except Exception as e:
+            pass
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -107,14 +117,16 @@ from amzdl.metadata.metadata import fetch_metadata
 from download_progress import get as get_download_progress, update as update_download_progress
 
 from tidal import tidal_router
+from qobuz import qobuz_router
 
 app = FastAPI(
     title="ClashFLAC Lossless API",
-    description="Unified Amazon Music & Tidal Lossless FLAC engine with Cloudflare Turnstile protection.",
-    version="2.2.0"
+    description="Unified Amazon Music, Qobuz & Tidal Lossless FLAC engine with Cloudflare Turnstile protection.",
+    version="2.3.0"
 )
 
 app.include_router(tidal_router)
+app.include_router(qobuz_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,7 +136,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
-
 
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 

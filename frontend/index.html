@@ -220,6 +220,35 @@
             <div class="dialog-heading"><div><p class="section-kicker">AUDIO PREFERENCES</p><h2>Quality Settings</h2></div><button class="icon-button" value="cancel" aria-label="Close settings"><svg><use href="#icon-x"></use></svg></button></div>
             
             <div class="settings-field">
+                <span class="settings-label">Preferred Lossless Engine</span>
+                <div class="quality-grid" id="engine-selector">
+                    <button type="button" class="engine-card active" data-engine="qobuz">
+                        <div class="quality-card-top">
+                            <strong>Qobuz Hi-Res</strong>
+                            <span class="badge qobuz-badge">Priority 1 (Default)</span>
+                        </div>
+                        <p>Studio master bit-perfect FLAC up to 24-bit / 192 kHz.</p>
+                    </button>
+                    <button type="button" class="engine-card" data-engine="amazon">
+                        <div class="quality-card-top">
+                            <strong>Amazon Music HD</strong>
+                            <span class="badge lossless">Priority 2</span>
+                        </div>
+                        <p>Ultra HD lossless FLAC stream up to 24-bit / 192 kHz.</p>
+                    </button>
+                    <button type="button" class="engine-card" data-engine="tidal">
+                        <div class="quality-card-top">
+                            <strong>Tidal Hi-Res Lossless</strong>
+                            <span class="badge tidal-badge">Priority 3</span>
+                        </div>
+                        <p>Hi-Res Master lossless FLAC up to 24-bit / 192 kHz.</p>
+                    </button>
+                </div>
+                <input type="hidden" id="engine-setting" value="qobuz">
+                <small class="settings-hint">ClashFLAC checks engines in your preferred priority order (Qobuz &rarr; Amazon &rarr; Tidal).</small>
+            </div>
+
+            <div class="settings-field">
                 <span class="settings-label">Select Audio Quality</span>
                 <div class="quality-grid" id="quality-selector">
                     <button type="button" class="quality-card active" data-value="UHD">
@@ -227,7 +256,7 @@
                             <strong>Ultra HD Master</strong>
                             <span class="badge lossless">24-bit / 192 kHz</span>
                         </div>
-                        <p>Studio master resolution (up to 24-bit / 192 kHz) directly from Amazon Music Ultra HD & Tidal Master.</p>
+                        <p>Studio master resolution (up to 24-bit / 192 kHz) directly from Amazon Music, Qobuz & Tidal.</p>
                     </button>
                     <button type="button" class="quality-card" data-value="HD">
                         <div class="quality-card-top">
@@ -238,7 +267,7 @@
                     </button>
                 </div>
                 <input type="hidden" id="quality-setting" value="UHD">
-                <small class="settings-hint">Applied automatically to Amazon Music & Tidal lossless FLAC downloads.</small>
+                <small class="settings-hint">Applied automatically to Amazon, Qobuz & Tidal lossless FLAC downloads.</small>
             </div>
 
             <div class="dialog-actions"><button class="secondary-button" value="cancel">Cancel</button><button class="primary-button" id="save-settings" value="default">Save Settings</button></div>
