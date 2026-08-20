@@ -760,6 +760,11 @@ function titlesCompatible(baseTitle, candTitle) {
 }
 
 function matchScore(base, candidate, candidateArtist = "") {
+    // 1. SpotiFLAC Priority 1: Exact ISRC Match (100% Studio Master Confidence)
+    if (base.isrc && candidate.isrc && String(base.isrc).trim().toUpperCase() === String(candidate.isrc).trim().toUpperCase()) {
+        return 100;
+    }
+
     const candTitle = candidate.title || candidate.name || "";
     if (!titlesCompatible(base.title, candTitle)) return -Infinity;
 
@@ -800,8 +805,8 @@ function matchScore(base, candidate, candidateArtist = "") {
     if (candidateDuration && baseDuration) {
         const difference = Math.abs(candidateDuration - baseDuration);
         if (difference <= 3) score += 4;
-        else if (difference <= 8) score += 2;
-        else if (difference > 25) score -= 6;
+        else if (difference <= 6) score += 2;
+        else if (difference > 15) score -= 8;
     }
 
     return score;
@@ -809,6 +814,13 @@ function matchScore(base, candidate, candidateArtist = "") {
 
 function bestMatch(base, candidates, artistGetter, options = {}) {
     const { minScore = 11, requireArtist = true, durationTolerance = 0 } = options;
+    
+    // SpotiFLAC Priority 1: Instant Exact ISRC match
+    if (base.isrc) {
+        const isrcMatch = candidates.find((c) => c.isrc && String(c.isrc).trim().toUpperCase() === String(base.isrc).trim().toUpperCase());
+        if (isrcMatch) return isrcMatch;
+    }
+
     let winner = null;
     let winnerScore = -Infinity;
     candidates.forEach((candidate) => {

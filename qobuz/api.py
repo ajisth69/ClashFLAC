@@ -186,6 +186,7 @@ class QobuzAPI:
                 hires=hires,
                 bit_depth=int(bit_depth or 16),
                 sampling_rate=float(sampling_rate or 44.1),
+                isrc=item.get("isrc"),
             ))
 
         return results

@@ -19,6 +19,7 @@ class QobuzSearchResultItem(BaseModel):
     hires: bool = True
     bit_depth: Optional[int] = 24
     sampling_rate: Optional[float] = 96.0
+    isrc: Optional[str] = None
 
 class QobuzTrackResponse(BaseModel):
     source_type: str = "qobuz"
@@ -34,6 +35,7 @@ class QobuzTrackResponse(BaseModel):
     sample_rate: Optional[int] = None
     bit_depth: Optional[int] = None
     hires: bool = True
+    isrc: Optional[str] = None
 
 class QobuzResolveRequest(BaseModel):
     input: str

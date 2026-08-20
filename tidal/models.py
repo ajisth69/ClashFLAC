@@ -17,6 +17,7 @@ class TidalSearchResultItem(BaseModel):
     disc_number: Optional[int] = None
     audio_quality: Optional[str] = None
     audio_modes: Optional[List[str]] = None
+    isrc: Optional[str] = None
 
 class TidalTrackResponse(BaseModel):
     source_type: str = "tidal"
@@ -31,6 +32,7 @@ class TidalTrackResponse(BaseModel):
     bitrate: Optional[int] = 0
     sample_rate: Optional[int] = None
     bit_depth: Optional[int] = None
+    isrc: Optional[str] = None
 
 class TidalResolveRequest(BaseModel):
     input: str

@@ -184,6 +184,7 @@ class TidalAPI:
             disc_number=doc.get("volumeNumber"),
             audio_quality=audio_quality,
             audio_modes=audio_modes,
+            isrc=doc.get("isrc"),
         )
 
     async def get_track(self, track_id: str) -> Dict[str, Any]:

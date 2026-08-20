@@ -307,6 +307,7 @@ class SpotifyMetadataItem(BaseModel):
     isrc: Optional[str] = None
 
 
+
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "85d955692d73429b941dda4676485f84")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "d14d6a3f7b03406a9c68f4987c4af787")
 _SPOTIFY_ACCESS_TOKEN = None
@@ -348,8 +349,50 @@ async def fetch_spotify_search(query: str, limit: int = 5) -> List[SpotifyMetada
     if not query:
         return results
 
+    # Method 1: Official Spotify Web API with ISRC (Primary SpotiFLAC method)
+    sp_token = await get_spotify_token()
+    if sp_token:
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                sp_res = await client.get(
+                    f"https://api.spotify.com/v1/search?q={quote(query)}&type=track&limit={limit}",
+                    headers={"Authorization": f"Bearer {sp_token}"}
+                )
+                if sp_res.status_code == 200:
+                    tracks_data = sp_res.json().get("tracks", {}).get("items", [])
+                    for t in tracks_data:
+                        t_id = t.get("id")
+                        t_title = t.get("name") or "Unknown Title"
+                        t_artists = ", ".join([a.get("name") for a in t.get("artists", []) if a.get("name")]) or "Unknown Artist"
+                        album_obj = t.get("album", {})
+                        t_album = album_obj.get("name") or ""
+                        images = album_obj.get("images", [])
+                        hq_img = images[0].get("url") if images else None
+                        thumb_img = images[-1].get("url") if images else hq_img
+                        rel_date = album_obj.get("release_date") or ""
+                        year = rel_date[:4] if rel_date else ""
+                        dur_ms = t.get("duration_ms", 0)
+                        isrc = t.get("external_ids", {}).get("isrc")
+                        results.append(SpotifyMetadataItem(
+                            spotify_id=t_id,
+                            title=t_title,
+                            artist=t_artists,
+                            album=t_album,
+                            thumbnail_url=thumb_img,
+                            thumbnail_hq=hq_img,
+                            year=year,
+                            release_date=rel_date[:10] if rel_date else "",
+                            duration_sec=int(dur_ms / 1000) if dur_ms else 0,
+                            preview_url=t.get("preview_url"),
+                            isrc=isrc
+                        ))
+                    if results:
+                        return results
+        except Exception as e:
+            logger.warning(f"Spotify Web API search failed: {e}")
+
     async with httpx.AsyncClient(timeout=7.0, follow_redirects=True, headers=headers) as client:
-        # Method 1: Check if input is a Spotify track ID or link
+        # Method 2: Check if input is a Spotify track ID or link
         track_id_match = re.search(r'(?:spotify\.com/(?:intl-[a-zA-Z\-]+/)?track/|spotify:track:|^)([a-zA-Z0-9]{22})', query)
         if track_id_match:
             track_id = track_id_match.group(1)
@@ -391,7 +434,7 @@ async def fetch_spotify_search(query: str, limit: int = 5) -> List[SpotifyMetada
             except Exception as e:
                 logger.warning(f"Spotify embed metadata fetch failed: {e}")
 
-        # Method 2: Query studio metadata and 30-sec audio previews via audio catalog
+        # Method 3: Query audio catalog fallback
         try:
             itunes_res = await client.get(f'https://itunes.apple.com/search?term={quote(query)}&entity=song&limit={limit}')
             if itunes_res.status_code == 200:
@@ -420,8 +463,6 @@ async def fetch_spotify_search(query: str, limit: int = 5) -> List[SpotifyMetada
             logger.warning(f"Preview search failed: {e}")
 
     return results
-
-
 
 class AmazonMusicResolver:
     def __init__(self):
