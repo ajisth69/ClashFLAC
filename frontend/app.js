@@ -745,11 +745,28 @@ function artistsCompatible(left, right) {
     return overlap || tokenSimilarity(a, b) >= 0.40;
 }
 
+function titlesCompatible(baseTitle, candTitle) {
+    const baseRaw = normalize(baseTitle);
+    const candRaw = normalize(candTitle);
+    const baseClean = normalize(cleanTitle(baseTitle));
+    const candClean = normalize(cleanTitle(candTitle));
+    if (!baseRaw || !candRaw) return false;
+    if (baseRaw === candRaw || baseClean === candClean) return true;
+    const simClean = tokenSimilarity(baseClean, candClean);
+    const simRaw = tokenSimilarity(baseRaw, candRaw);
+    if (Math.max(simClean, simRaw) >= 0.65) return true;
+    if ((baseClean.includes(candClean) || candClean.includes(baseClean)) && Math.min(baseClean.length, candClean.length) >= 4) return true;
+    return false;
+}
+
 function matchScore(base, candidate, candidateArtist = "") {
+    const candTitle = candidate.title || candidate.name || "";
+    if (!titlesCompatible(base.title, candTitle)) return -Infinity;
+
     const baseRaw = normalize(base.title);
-    const candRaw = normalize(candidate.title || candidate.name);
+    const candRaw = normalize(candTitle);
     const baseClean = normalize(cleanTitle(base.title));
-    const candClean = normalize(cleanTitle(candidate.title || candidate.name));
+    const candClean = normalize(cleanTitle(candTitle));
     
     let score = 0;
     if (baseRaw === candRaw || baseClean === candClean) {
@@ -795,6 +812,8 @@ function bestMatch(base, candidates, artistGetter, options = {}) {
     let winner = null;
     let winnerScore = -Infinity;
     candidates.forEach((candidate) => {
+        const candidateTitle = candidate.title || candidate.name;
+        if (!titlesCompatible(base.title, candidateTitle)) return;
         const candidateArtist = artistGetter(candidate);
         if (requireArtist && !artistsCompatible(base.artist, candidateArtist)) return;
         const candidateDuration = Number(candidate.duration || candidate.duration_sec || 0);
