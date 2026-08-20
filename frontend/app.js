@@ -810,10 +810,40 @@ function bestMatch(base, candidates, artistGetter, options = {}) {
 }
 
 function previewArtists(item) {
-    return item?.artists?.primary?.map((artist) => artist.name).join(", ") || "Unknown artist";
+    if (!item) return "Unknown artist";
+    if (item.artists?.primary?.length) {
+        return item.artists.primary.map((a) => a.name).filter(Boolean).join(", ");
+    }
+    if (item.artists?.all?.length) {
+        return item.artists.all.map((a) => a.name).filter(Boolean).join(", ");
+    }
+    if (typeof item.primaryArtists === "string" && item.primaryArtists.trim()) {
+        return item.primaryArtists;
+    }
+    if (typeof item.artist === "string" && item.artist.trim()) {
+        return item.artist;
+    }
+    if (typeof item.singers === "string" && item.singers.trim()) {
+        return item.singers;
+    }
+    return "Unknown artist";
 }
 
+const REJECT_NOISE = ["karaoke", "cover", "tribute", "parody", "originally performed", "backing track", "piano version", "instrumental version", "in the style of", "re-recorded", "re recorded", "lofi remix", "slowed reverb"];
 const VERSION_MARKERS = ["acoustic", "ambient", "cover", "extended", "instrumental", "karaoke", "live", "nightcore", "radio edit", "remix", "slowed", "sped up", "techno"];
+
+function isCandidateBogus(candidateTitle, candidateArtist, baseTitle, baseArtist) {
+    const candT = normalize(candidateTitle);
+    const candA = normalize(candidateArtist);
+    const baseT = normalize(baseTitle);
+    const baseA = normalize(baseArtist);
+    for (const noise of REJECT_NOISE) {
+        if ((candT.includes(noise) || candA.includes(noise)) && !baseT.includes(noise) && !baseA.includes(noise)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 function versionsCompatible(catalogTitle, previewTitle) {
     return VERSION_MARKERS.every((marker) =>
@@ -839,10 +869,13 @@ function isExactSpotifyMatch(base, spotify) {
     const candArtist = spotify.artist;
     if (baseArtist && !artistsCompatible(baseArtist, candArtist)) return false;
 
-    // Strict duration match (within 8 seconds)
+    // Strict bogus rejection
+    if (isCandidateBogus(spotify.title, spotify.artist, base.title, base.artist)) return false;
+
+    // Strict duration match (within 6 seconds)
     const baseDur = Number(base.duration || base.duration_sec || 0);
     const candDur = Number(spotify.duration || spotify.duration_sec || 0);
-    if (baseDur && candDur && Math.abs(baseDur - candDur) > 8) return false;
+    if (baseDur && candDur && Math.abs(baseDur - candDur) > 6) return false;
 
     return true;
 }
@@ -859,9 +892,16 @@ function findCatalogPreview(item, spotifyItems, previewItems) {
     const artist = rawArtist || spotify?.artist || "Unknown artist";
     return bestMatch(
         { title: item.title || "Unknown title", artist, album: item.album || spotify?.album || "", duration: Number(item.duration_sec || 0) },
-        (previewItems || []).filter((candidate) => getPreviewUrl(candidate) && versionsCompatible(item.title, candidate.name || candidate.title)),
+        (previewItems || []).filter((candidate) => {
+            const candTitle = candidate.name || candidate.title;
+            const candArtist = previewArtists(candidate);
+            if (!getPreviewUrl(candidate)) return false;
+            if (!versionsCompatible(item.title, candTitle)) return false;
+            if (isCandidateBogus(candTitle, candArtist, item.title, artist)) return false;
+            return true;
+        }),
         previewArtists,
-        { minScore: normalize(artist).includes("unknown") ? 14 : 18, requireArtist: !normalize(artist).includes("unknown"), durationTolerance: 8 }
+        { minScore: normalize(artist).includes("unknown") ? 14 : 18, requireArtist: !normalize(artist).includes("unknown"), durationTolerance: 6 }
     );
 }
 
@@ -901,7 +941,7 @@ function mergeSearchSources(amazonItems, qobuzItems, tidalItems, spotifyItems, p
         // Find matching Qobuz track
         const matchedQobuz = bestMatch(
             { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
-            (qobuzItems || []).filter((q) => !matchedQobuzAsins.has(String(q.asin))),
+            (qobuzItems || []).filter((q) => !matchedQobuzAsins.has(String(q.asin)) && !isCandidateBogus(q.title, q.artist, amzItem.title, rawArtist)),
             (entry) => entry.artist || "",
             { minScore: 12, requireArtist: Boolean(rawArtist) }
         );
@@ -910,7 +950,7 @@ function mergeSearchSources(amazonItems, qobuzItems, tidalItems, spotifyItems, p
         // Find matching Tidal track
         const matchedTidal = bestMatch(
             { title: amzItem.title, artist: rawArtist || spotify?.artist || "", album: amzItem.album || spotify?.album || "", duration: Number(amzItem.duration_sec || 0) },
-            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin)) && !isCandidateBogus(t.title, t.artist, amzItem.title, rawArtist)),
             (entry) => entry.artist || "",
             { minScore: 12, requireArtist: Boolean(rawArtist) }
         );
@@ -1001,7 +1041,7 @@ function mergeSearchSources(amazonItems, qobuzItems, tidalItems, spotifyItems, p
 
         const matchedTidal = bestMatch(
             { title: qItem.title, artist: rawArtist || spotify?.artist || "", album: qItem.album || spotify?.album || "", duration: Number(qItem.duration_sec || 0) },
-            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin))),
+            (tidalItems || []).filter((t) => !matchedTidalAsins.has(String(t.asin)) && !isCandidateBogus(t.title, t.artist, qItem.title, rawArtist)),
             (entry) => entry.artist || "",
             { minScore: 12, requireArtist: Boolean(rawArtist) }
         );
